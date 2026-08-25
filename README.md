@@ -25,16 +25,21 @@ Three things stop it going further, and this library fixes all three.
 ## Usage
 
 ```cnx
-ElapsedTime.Config elapsed250 <- { total: 0, startedAtTick: 0, rollOverAt: 0, tick: millis };
+ElapsedTime.Config elapsed250 <- {
+    total: 0, startedAtTick: 0, rollOverAt: 0, dueEvery: 250, tick: millis
+};
 
 void loop() {
-    u32 e <- ElapsedTime.timeSince(elapsed250);
-    if (e >= 250) {
-        ElapsedTime.reset(elapsed250);
+    bool due <- ElapsedTime.isDue(elapsed250);
+    if (due = true) {
         fireThe250msThings();
     }
 }
 ```
+
+`isDue` is the whole pattern in one call: it reports whether the interval has elapsed and advances the timer if it has, so there is no reset to forget, and the interval lives with the timer rather than being repeated at every call site.
+
+(Two lines rather than one because C-Next forbids a function call inside an `if` condition — MISRA C:2012 Rule 13.5, `E0702`.)
 
 Want it to outlive 49.7 days? Call `handleOverflow` somewhere that runs regularly — every second, every minute, whatever suits that timer:
 
@@ -72,10 +77,12 @@ scope ElapsedTime {
         u64 total;              // elapsed folded in by previous handleOverflow calls
         u32 startedAtTick;      // origin of the current un-drained interval
         u32 rollOverAt;         // 0 = fold on every call; raise to skip the u64 math
+        u32 dueEvery;           // isDue interval; 0 = never due
         tickSource tick;        // the clock
     }
 
-    public u32 timeSince(const Config timer);   // wrap-safe ticks since the last fold/reset
+    public bool isDue(Config timer);            // due? if so, advance and say true
+    public u32 timeSince(const Config timer);   // wrap-safe ticks since the last fold
     public u64 value(const Config timer);       // total + timeSince
     public void handleOverflow(Config timer);   // fold timeSince into total
     public void seed(Config timer, u32 now);    // set the origin explicitly
@@ -83,7 +90,7 @@ scope ElapsedTime {
 }
 ```
 
-14 bytes per timer on AVR.
+18 bytes per timer on AVR.
 
 ## Design notes
 
@@ -97,6 +104,23 @@ return (4294967295 - startedAtTick) + now + 1;
 ```
 
 That expression cannot overflow: the second branch runs only when `now < startedAtTick`, so its result is at most `4294967295` exactly.
+
+**`isDue` advances before the handler runs, and that ordering is the design.** It reads the clock once, and if the interval has elapsed it folds and advances *before* returning `true` — so the caller's handler executes on already-advanced state and its duration cannot push the next firing:
+
+```
+t=250   isDue -> fires, startedAtTick <- 250
+        handler runs 249 ms
+t=499   isDue -> timeSince 249 -> false
+t=500   isDue -> timeSince 250 -> fires
+```
+
+Firings land at 250, 500, 750. The same two statements in the other order drift by the handler's duration every time, which is why the sequencing is commented in the implementation rather than left looking arbitrary.
+
+**It advances to *now*, not by exactly one interval.** Advancing by the interval is drift-free against late polling, but when a handler outruns its interval it either silently skips a slot or fires repeatedly to catch up. Advancing to now does neither: it never skips, never fires twice in a row, and when the handler is genuinely slower than the interval it self-limits to the handler's real rate instead of building a backlog. The only residual drift is polling latency, which is microseconds when `isDue` runs each loop.
+
+**`dueEvery: 0` means never due**, not always due. A zero-initialised timer firing on every call would be a trap, and `0 >= 0` is true for unsigned values.
+
+**`isDue` folds rather than resets**, so `value()` stays a true cumulative on a polled timer. `reset()` would zero `total` and leave `value()` permanently near zero on anything periodic.
 
 **Overflow handling is opt-in and costs nothing when unused.** `handleOverflow` folds the un-drained interval into `total` and restarts the interval from the same tick reading — so the intervals abut exactly and **no time is lost at the boundary**. Never call it and `total` stays 0, making `value()` identical to `timeSince()` with the ordinary 49.7-day ceiling. No flag, no second type: the feature is a call you make or don't.
 
