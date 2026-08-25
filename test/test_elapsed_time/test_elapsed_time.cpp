@@ -7,6 +7,11 @@
 static uint32_t fakeNow = 0;
 extern "C" uint32_t fakeClock(void) { return fakeNow; }
 
+// A tick that is not a clock at all. Nothing in the library assumes time --
+// only a monotonically increasing u32 -- so the same timer counts executions.
+static uint32_t callCount = 0;
+extern "C" uint32_t countingTick(void) { return callCount; }
+
 static ElapsedTime__Config makeTimer(uint32_t dueEvery = 0,
                                      uint32_t rollOverAt = 0) {
     ElapsedTime__Config t;
@@ -215,6 +220,31 @@ void test_value_survives_repeated_firings(void) {
     TEST_ASSERT_EQUAL_UINT64(10000u, ElapsedTime__value(&t));
 }
 
+// --------------------------------------------------- the tick need not be time
+
+void test_counts_executions_when_the_tick_is_a_counter(void) {
+    ElapsedTime__Config everyHundred = makeTimer(100);
+    everyHundred.tick = countingTick;
+    callCount = 0;
+    ElapsedTime__seed(&everyHundred, callCount);
+
+    int fired = 0;
+    for (uint32_t call = 1; call <= 1000; call++) {
+        callCount = call;                        // the counted code ticks it
+        if (ElapsedTime__isDue(&everyHundred)) { fired++; }
+    }
+    TEST_ASSERT_EQUAL_INT(10, fired);
+    TEST_ASSERT_EQUAL_UINT64(1000u, ElapsedTime__value(&everyHundred));
+}
+
+void test_counter_wrap_behaves_like_a_clock_wrap(void) {
+    ElapsedTime__Config t = makeTimer(10);
+    t.tick = countingTick;
+    callCount = 4294967290u; ElapsedTime__seed(&t, callCount);
+    callCount = 4u;                              // 5 to the ceiling, +1, +4 = 10
+    TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_plain_difference);
@@ -238,5 +268,7 @@ int main(int, char **) {
     RUN_TEST(test_fires_across_a_clock_wrap);
     RUN_TEST(test_due_every_zero_never_fires);
     RUN_TEST(test_value_survives_repeated_firings);
+    RUN_TEST(test_counts_executions_when_the_tick_is_a_counter);
+    RUN_TEST(test_counter_wrap_behaves_like_a_clock_wrap);
     return UNITY_END();
 }

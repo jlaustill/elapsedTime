@@ -65,6 +65,23 @@ The clock is a caller-supplied callback, so the library never names a platform:
 
 It also means the library is not embedded-specific at all. Nothing in it names a framework, so it builds and runs on a host — the entire test suite runs natively against a fake clock, no board and no cross-compiler involved. A desktop application, a server, a game loop or a wasm build can use it exactly as an MCU does.
 
+### The tick need not be a clock
+
+Nothing in the library assumes time. `sinceTick` needs only a monotonically increasing `u32`, so a counter works exactly as well as a clock — feed it a value your own code increments and `dueEvery: 100` means *every hundredth execution*, while `value()` becomes a total execution count, unbounded past 2³² via `handleOverflow` just as time is.
+
+```cnx
+u32 framesSeen <- 0;
+u32 frameTick() { return framesSeen; }      // a pure READ
+
+ElapsedTime.Config everyHundredthFrame <- {
+    total: 0, startedAtTick: 0, rollOverAt: 0, dueEvery: 100, tick: frameTick
+};
+```
+
+The increment belongs in the code being counted; the tick function must stay a pure read. A tick that incremented on read would count *observations* rather than executions, and every `value()` call would inflate it.
+
+Pairing two timers on different ticks is where this earns its keep: a time-based timer at 1 Hz plus a counting one gives loop rate — iterations per second — with no extra machinery.
+
 Because the clock is **per-timer**, milliseconds and microseconds coexist in one program — which also collapses `elapsedMillis` and `elapsedMicros` into a single type instead of two byte-for-byte duplicates.
 
 ## API
