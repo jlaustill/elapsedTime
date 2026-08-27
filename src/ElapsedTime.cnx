@@ -1,0 +1,124 @@
+// elapsedTime -- portable, tick-agnostic elapsed-time timers.
+//
+// The clock is supplied by the caller, so nothing here names a platform and the
+// whole library compiles on a host with no framework at all.
+
+// The clock type. ADR-029: a function definition creates both a function and a
+// type, and a field of that type initialises to the defining function -- so a
+// timer's clock is never null. An unconfigured timer reads a clock stuck at 0
+// rather than jumping through a null pointer.
+u32 tickSource() {
+    return 0;
+}
+
+scope ElapsedTime {
+    public struct Config {
+        u64 total;              // elapsed folded in by earlier folds
+        u32 startedAtTick;      // tick value at the last fold or reset
+        u32 rollOverAt;         // handleOverflow threshold; 0 folds every call
+        u32 dueEvery;           // isDue interval; 0 means never due
+        tickSource tick;        // the clock
+    }
+
+    // Wrap-safe ticks from base to now.
+    //
+    // Every u32 tick source wraps -- 49.7 days at milliseconds, 71.6 minutes at
+    // microseconds. Teensy's elapsedMillis stays correct across that only
+    // because C's unsigned subtraction wraps; C-Next defaults to clamp
+    // arithmetic, which saturates instead and would stall every timer for a
+    // full wrap period. So the wrap is one visible branch.
+    //
+    // Cannot overflow: the second branch runs only when now < base, so the
+    // result is at most 4294967295 exactly.
+    //
+    // The single owner of this arithmetic -- timeSince, handleOverflow and
+    // isDue all route through it, and each reads the clock exactly once.
+    private u32 sinceTick(u32 base, u32 now) {
+        if (now >= base) {
+            return now - base;
+        }
+        return (4294967295 - base) + now + 1;
+    }
+
+    // Ticks since the last fold or reset. Computed on every read, so a timer
+    // cannot go stale and needs no per-loop update step.
+    public u32 timeSince(const Config timer) {
+        u32 now <- timer.tick();
+        return sinceTick(timer.startedAtTick, now);
+    }
+
+    // Total elapsed since the timer was seeded, across any number of folds.
+    public u64 value(const Config timer) {
+        u32 since <- timeSince(timer);
+        u64 accumulated <- timer.total;
+        return accumulated + since;
+    }
+
+    // Set the origin explicitly.
+    //
+    // C-Next has no constructors (ADR-005) and a global's initialiser must be a
+    // compile-time constant, so a timer cannot capture its clock where it is
+    // declared. Seeding several timers from one clock reading also aligns them
+    // exactly, rather than letting them drift by the ticks between separate
+    // reset() calls.
+    public void seed(Config timer, u32 now) {
+        timer.total <- 0;
+        timer.startedAtTick <- now;
+    }
+
+    public void reset(Config timer) {
+        u32 now <- timer.tick();
+        seed(timer, now);
+    }
+
+    // Fold the un-drained interval into total, lifting the 49.7-day ceiling.
+    //
+    // Opt-in and free when unused: never call it and total stays 0, leaving
+    // value() identical to timeSince() with the ordinary ceiling.
+    //
+    // One clock read. Reading once for the difference and again for the new
+    // origin loses whatever elapsed between them -- a few ticks per fold,
+    // every fold, forever. One reading both terminates the old interval and
+    // begins the new one, so they abut exactly and no time is lost.
+    public void handleOverflow(Config timer) {
+        u32 now <- timer.tick();
+        u32 since <- sinceTick(timer.startedAtTick, now);
+        if (since > timer.rollOverAt) {
+            timer.total +<- since;
+            timer.startedAtTick <- now;
+        }
+    }
+
+    // Is the interval up? If so, advance the timer and say true.
+    //
+    // dueEvery 0 means never due, not always due: a zero-initialised timer
+    // firing on every call would be a trap, and 0 >= 0 holds for unsigned.
+    //
+    // The advance happens BEFORE returning true, so the caller's handler runs
+    // on already-advanced state and its duration cannot push the next firing.
+    // These same statements in the other order drift by the handler's duration
+    // on every firing.
+    //
+    // It advances to now rather than by exactly one interval. Advancing by the
+    // interval either silently skips a slot or fires repeatedly to catch up
+    // when a handler outruns its interval; advancing to now does neither, and
+    // self-limits to the handler's real rate.
+    //
+    // Folds rather than resets, so value() stays a true cumulative on a polled
+    // timer instead of being zeroed on every firing.
+    public bool isDue(Config timer) {
+        if (timer.dueEvery = 0) {
+            return false;
+        }
+
+        u32 now <- timer.tick();
+        u32 since <- sinceTick(timer.startedAtTick, now);
+        if (since < timer.dueEvery) {
+            return false;
+        }
+
+        timer.total +<- since;
+        timer.startedAtTick <- now;
+        return true;
+    }
+}
