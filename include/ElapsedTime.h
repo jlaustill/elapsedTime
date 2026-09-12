@@ -14,25 +14,25 @@ extern "C" {
 #endif
 
 /* Callback typedefs */
-typedef uint32_t (*tickSource_fp)(void);
+typedef uint32_t (*ElapsedTime__tickSource_fp)(void);
 
 /* Struct definitions */
-typedef struct ElapsedTime__Config {
+typedef struct ElapsedTime__Timer {
+    uint32_t dueEvery;
+    ElapsedTime__tickSource_fp tick;
     uint64_t total;
     uint32_t startedAtTick;
-    uint32_t rollOverAt;
-    uint32_t dueEvery;
-    tickSource_fp tick;
-} ElapsedTime__Config;
+    bool started;
+} ElapsedTime__Timer;
 
 /* Function prototypes */
-uint32_t tickSource(void);
-uint32_t ElapsedTime__timeSince(const ElapsedTime__Config* timer);
-uint64_t ElapsedTime__value(const ElapsedTime__Config* timer);
-void ElapsedTime__seed(ElapsedTime__Config* timer, uint32_t now);
-void ElapsedTime__reset(ElapsedTime__Config* timer);
-void ElapsedTime__handleOverflow(ElapsedTime__Config* timer);
-bool ElapsedTime__isDue(ElapsedTime__Config* timer);
+uint32_t ElapsedTime__tickSource(void);
+bool ElapsedTime__isDue(ElapsedTime__Timer* timer);
+uint64_t ElapsedTime__elapsed(ElapsedTime__Timer* timer);
+bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, uint32_t ticks);
+uint32_t ElapsedTime__remaining(ElapsedTime__Timer* timer);
+void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now);
+void ElapsedTime__reset(ElapsedTime__Timer* timer);
 
 #ifdef __cplusplus
 }

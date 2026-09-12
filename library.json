@@ -1,6 +1,6 @@
 {
   "name": "elapsedTime",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable, tick-agnostic elapsed-time timers for C-Next. The ergonomics of Teensy's elapsedMillis, for any MCU, any tick source, and with no 49.7-day ceiling.",
   "keywords": ["timer", "elapsed", "millis", "micros", "c-next", "cnext", "scheduling"],
   "repository": { "type": "git", "url": "https://github.com/jlaustill/elapsedTime.git" },

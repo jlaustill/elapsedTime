@@ -3,21 +3,27 @@
 // The clock is supplied by the caller, so nothing here names a platform and the
 // whole library compiles on a host with no framework at all.
 
-// The clock type. ADR-029: a function definition creates both a function and a
-// type, and a field of that type initialises to the defining function -- so a
-// timer's clock is never null. An unconfigured timer reads a clock stuck at 0
-// rather than jumping through a null pointer.
-u32 tickSource() {
-    return 0;
-}
-
 scope ElapsedTime {
-    public struct Config {
-        u64 total;              // elapsed folded in by earlier folds
-        u32 startedAtTick;      // tick value at the last fold or reset
-        u32 rollOverAt;         // handleOverflow threshold; 0 folds every call
+    // The clock type. ADR-029: a function definition creates both a function
+    // and a type, and a field of that type initialises to the defining function
+    // -- so a timer's clock is never null. An unconfigured timer reads a clock
+    // stuck at 0 rather than jumping through a null pointer.
+    public u32 tickSource() {
+        return 0;
+    }
+
+    // A timer declaration is complete on its own:
+    //
+    //     ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
+    //
+    // The two fields a user writes come first, so the struct reads in the order
+    // it is typed. The rest are internal and zero-fill (C99 6.7.9p21).
+    public struct Timer {
         u32 dueEvery;           // isDue interval; 0 means never due
         tickSource tick;        // the clock
+        u64 total;              // internal -- elapsed folded in by earlier folds
+        u32 startedAtTick;      // internal -- origin of the current interval
+        bool started;           // internal -- false until the first touch
     }
 
     // Wrap-safe ticks from base to now.
@@ -30,9 +36,6 @@ scope ElapsedTime {
     //
     // Cannot overflow: the second branch runs only when now < base, so the
     // result is at most 4294967295 exactly.
-    //
-    // The single owner of this arithmetic -- timeSince, handleOverflow and
-    // isDue all route through it, and each reads the clock exactly once.
     private u32 sinceTick(u32 base, u32 now) {
         if (now >= base) {
             return now - base;
@@ -40,53 +43,22 @@ scope ElapsedTime {
         return (4294967295 - base) + now + 1;
     }
 
-    // Ticks since the last fold or reset. Computed on every read, so a timer
-    // cannot go stale and needs no per-loop update step.
-    public u32 timeSince(const Config timer) {
-        u32 now <- timer.tick();
-        return sinceTick(timer.startedAtTick, now);
-    }
-
-    // Total elapsed since the timer was seeded, across any number of folds.
-    public u64 value(const Config timer) {
-        u32 since <- timeSince(timer);
-        u64 accumulated <- timer.total;
-        return accumulated + since;
-    }
-
-    // Set the origin explicitly.
+    // Ticks since the origin, seeding the timer if this is its first touch.
     //
     // C-Next has no constructors (ADR-005) and a global's initialiser must be a
     // compile-time constant, so a timer cannot capture its clock where it is
-    // declared. Seeding several timers from one clock reading also aligns them
-    // exactly, rather than letting them drift by the ticks between separate
-    // reset() calls.
-    public void seed(Config timer, u32 now) {
-        timer.total <- 0;
-        timer.startedAtTick <- now;
-    }
-
-    public void reset(Config timer) {
-        u32 now <- timer.tick();
-        seed(timer, now);
-    }
-
-    // Fold the un-drained interval into total, lifting the 49.7-day ceiling.
+    // declared. A timer left at startedAtTick 0 while millis() already reads
+    // 40000 would fire immediately and report 40 seconds that never elapsed.
     //
-    // Opt-in and free when unused: never call it and total stays 0, leaving
-    // value() identical to timeSince() with the ordinary ceiling.
-    //
-    // One clock read. Reading once for the difference and again for the new
-    // origin loses whatever elapsed between them -- a few ticks per fold,
-    // every fold, forever. One reading both terminates the old interval and
-    // begins the new one, so they abut exactly and no time is lost.
-    public void handleOverflow(Config timer) {
-        u32 now <- timer.tick();
-        u32 since <- sinceTick(timer.startedAtTick, now);
-        if (since > timer.rollOverAt) {
-            timer.total +<- since;
+    // Seeding lives here and only here, so no two public functions can disagree
+    // about what a fresh timer means.
+    private u32 sinceNow(Timer timer, u32 now) {
+        if (timer.started = false) {
+            timer.started <- true;
             timer.startedAtTick <- now;
+            return 0;
         }
+        return sinceTick(timer.startedAtTick, now);
     }
 
     // Is the interval up? If so, advance the timer and say true.
@@ -104,15 +76,15 @@ scope ElapsedTime {
     // when a handler outruns its interval; advancing to now does neither, and
     // self-limits to the handler's real rate.
     //
-    // Folds rather than resets, so value() stays a true cumulative on a polled
-    // timer instead of being zeroed on every firing.
-    public bool isDue(Config timer) {
+    // Folds rather than resets, so elapsed() stays a true cumulative on a
+    // polled timer instead of being zeroed on every firing.
+    public bool isDue(Timer timer) {
         if (timer.dueEvery = 0) {
             return false;
         }
 
         u32 now <- timer.tick();
-        u32 since <- sinceTick(timer.startedAtTick, now);
+        u32 since <- sinceNow(timer, now);
         if (since < timer.dueEvery) {
             return false;
         }
@@ -120,5 +92,88 @@ scope ElapsedTime {
         timer.total +<- since;
         timer.startedAtTick <- now;
         return true;
+    }
+
+    // The u64 cumulative, folding first when the un-drained interval comes
+    // within reach of the u32 ceiling.
+    //
+    // Folding is private and automatic because the proof of concept's public
+    // handleOverflow() was a step a user could forget, and forgetting it was
+    // silent. The threshold is a fixed 2^31 -- 24.8 days at milliseconds, 35.8
+    // minutes at microseconds -- which leaves an enormous margin before the
+    // ceiling while costing one u64 add per 2^31 ticks. It is also the cheapest
+    // threshold to test: `since >= 2147483648` is "is bit 31 set", a single
+    // high-byte test on AVR rather than a four-byte comparison.
+    private u64 valueAt(Timer timer, u32 now) {
+        u32 since <- sinceNow(timer, now);
+        if (since >= 2147483648) {
+            timer.total +<- since;
+            timer.startedAtTick <- now;
+            u64 folded <- timer.total;
+            return folded;
+        }
+        u64 accumulated <- timer.total;
+        return accumulated + since;
+    }
+
+    // Total elapsed since the timer started, unbounded.
+    //
+    // Mutates, because folding is a write -- which is why no accessor here can
+    // take const. That is honest: a timer is a stateful object, and
+    // elapsedMillis behaves the same way.
+    public u64 elapsed(Timer timer) {
+        u32 now <- timer.tick();
+        return valueAt(timer, now);
+    }
+
+    // Has this much time passed since the timer started? Does not advance.
+    //
+    // Serves one-shots that have no dueEvery -- "has it been five seconds
+    // since boot?" It is not a cheap u32 path: "elapsed since reset" is
+    // total + since, inherently u64. The justification is reach, not speed.
+    // A u64 of milliseconds tops out 584 million years away, so a threshold
+    // of a year is a legitimate call on hardware that will never reach its
+    // own ceiling.
+    public bool hasElapsed(Timer timer, u32 ticks) {
+        u32 now <- timer.tick();
+        u64 total <- valueAt(timer, now);
+        u64 threshold <- ticks;
+        return total >= threshold;
+    }
+
+    // Ticks until the next firing; 0 when already due.
+    //
+    // A never-due timer reports u32max, not 0. The use case is low-power
+    // scheduling, where a caller takes the minimum across several timers to
+    // decide how long it may sleep. u32max is the identity for minimum, so a
+    // never-due timer correctly does not constrain the sleep; 0 would make
+    // every never-due timer prevent sleeping entirely.
+    public u32 remaining(Timer timer) {
+        if (timer.dueEvery = 0) {
+            return 4294967295;
+        }
+
+        u32 now <- timer.tick();
+        u32 since <- sinceNow(timer, now);
+        if (since >= timer.dueEvery) {
+            return 0;
+        }
+        return timer.dueEvery - since;
+    }
+
+    // Set the origin explicitly, and drop the accumulated total.
+    //
+    // Seeding several timers from one clock reading aligns them exactly,
+    // rather than letting them drift by the ticks between separate reset()
+    // calls.
+    public void resetTo(Timer timer, u32 now) {
+        timer.total <- 0;
+        timer.startedAtTick <- now;
+        timer.started <- true;
+    }
+
+    public void reset(Timer timer) {
+        u32 now <- timer.tick();
+        resetTo(timer, now);
     }
 }
