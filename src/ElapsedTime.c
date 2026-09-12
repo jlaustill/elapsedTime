@@ -30,7 +30,7 @@ static inline uint64_t cnx_clamp_add_u64(uint64_t a, uint64_t b) {
 // timer's clock is never null. An unconfigured timer reads a clock stuck at 0
 // rather than jumping through a null pointer.
 uint32_t tickSource(void) {
-    return 0;
+    return 0U;
 }
 
 /* Scope: ElapsedTime */
@@ -39,7 +39,7 @@ static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
     if (now >= base) {
         return now - base;
     }
-    return (4294967295 - base) + now + 1;
+    return (4294967295U - base) + now + 1U;
 }
 
 uint32_t ElapsedTime__timeSince(const ElapsedTime__Config* timer) {

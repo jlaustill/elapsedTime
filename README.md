@@ -2,7 +2,7 @@
 
 Portable, tick-agnostic elapsed-time timers for [C-Next](https://github.com/jlaustill/c-next) — the ergonomics behind Teensy's `elapsedMillis`, for **any MCU**, **any tick source**, and with **no 49.7-day ceiling**.
 
-> **Status: implemented, 21/21 tests passing.** Requires a C-Next build carrying
+> **Status: implemented, 23/23 tests passing.** Requires a C-Next build carrying
 > [c-next#1207](https://github.com/jlaustill/c-next/pull/1207) (merged, not yet
 > released) — see [Requirements](#requirements).
 
@@ -168,7 +168,7 @@ Two further defects found while designing this shaped the API rather than blocki
 pio test -e native
 ```
 
-21 tests against a clock the suite drives by hand, so every assertion is exact rather than approximate. The cases that carry the design:
+23 tests against a clock the suite drives by hand, so every assertion is exact rather than approximate. The cases that carry the design:
 
 | Test | What it pins |
 | --- | --- |
