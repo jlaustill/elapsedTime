@@ -21,19 +21,20 @@ static inline uint64_t cnx_clamp_add_u64(uint64_t a, uint64_t b) {
     return (uint64_t)(a + (uint64_t)b);
 }
 
+static inline uint32_t cnx_clamp_sub_u32(uint32_t a, uint64_t b) {
+    if (b > (uint64_t)a) return 0;
+    return (uint32_t)(a - (uint32_t)b);
+}
+
 // elapsedTime -- portable, tick-agnostic elapsed-time timers.
 //
 // The clock is supplied by the caller, so nothing here names a platform and the
 // whole library compiles on a host with no framework at all.
-// The clock type. ADR-029: a function definition creates both a function and a
-// type, and a field of that type initialises to the defining function -- so a
-// timer's clock is never null. An unconfigured timer reads a clock stuck at 0
-// rather than jumping through a null pointer.
-uint32_t tickSource(void) {
+/* Scope: ElapsedTime */
+
+uint32_t ElapsedTime__tickSource(void) {
     return 0U;
 }
-
-/* Scope: ElapsedTime */
 
 static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
     if (now >= base) {
@@ -42,46 +43,72 @@ static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
     return (4294967295U - base) + now + 1U;
 }
 
-uint32_t ElapsedTime__timeSince(const ElapsedTime__Config* timer) {
-    uint32_t now = timer->tick();
+static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
+    if (timer->started == false) {
+        timer->started = true;
+        timer->startedAtTick = now;
+        return 0U;
+    }
     return ElapsedTime__sinceTick(timer->startedAtTick, now);
 }
 
-uint64_t ElapsedTime__value(const ElapsedTime__Config* timer) {
-    uint32_t since = ElapsedTime__timeSince(timer);
-    uint64_t accumulated = timer->total;
-    return cnx_clamp_add_u64(accumulated, since);
-}
-
-void ElapsedTime__seed(ElapsedTime__Config* timer, uint32_t now) {
-    timer->total = 0ULL;
-    timer->startedAtTick = now;
-}
-
-void ElapsedTime__reset(ElapsedTime__Config* timer) {
-    uint32_t now = timer->tick();
-    ElapsedTime__seed(timer, now);
-}
-
-void ElapsedTime__handleOverflow(ElapsedTime__Config* timer) {
-    uint32_t now = timer->tick();
-    uint32_t since = ElapsedTime__sinceTick(timer->startedAtTick, now);
-    if (since > timer->rollOverAt) {
-        timer->total += since;
-        timer->startedAtTick = now;
-    }
-}
-
-bool ElapsedTime__isDue(ElapsedTime__Config* timer) {
+bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
     if (timer->dueEvery == 0) {
         return false;
     }
     uint32_t now = timer->tick();
-    uint32_t since = ElapsedTime__sinceTick(timer->startedAtTick, now);
+    uint32_t since = ElapsedTime__sinceNow(timer, now);
     if (since < timer->dueEvery) {
         return false;
     }
     timer->total += since;
     timer->startedAtTick = now;
     return true;
+}
+
+static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
+    uint32_t since = ElapsedTime__sinceNow(timer, now);
+    if (since >= 2147483648) {
+        timer->total += since;
+        timer->startedAtTick = now;
+        uint64_t folded = timer->total;
+        return folded;
+    }
+    uint64_t accumulated = timer->total;
+    return cnx_clamp_add_u64(accumulated, since);
+}
+
+uint64_t ElapsedTime__elapsed(ElapsedTime__Timer* timer) {
+    uint32_t now = timer->tick();
+    return ElapsedTime__valueAt(timer, now);
+}
+
+bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, uint32_t ticks) {
+    uint32_t now = timer->tick();
+    uint64_t total = ElapsedTime__valueAt(timer, now);
+    uint64_t threshold = ticks;
+    return total >= threshold;
+}
+
+uint32_t ElapsedTime__remaining(ElapsedTime__Timer* timer) {
+    if (timer->dueEvery == 0) {
+        return 4294967295U;
+    }
+    uint32_t now = timer->tick();
+    uint32_t since = ElapsedTime__sinceNow(timer, now);
+    if (since >= timer->dueEvery) {
+        return 0U;
+    }
+    return cnx_clamp_sub_u32(timer->dueEvery, since);
+}
+
+void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now) {
+    timer->total = 0ULL;
+    timer->startedAtTick = now;
+    timer->started = true;
+}
+
+void ElapsedTime__reset(ElapsedTime__Timer* timer) {
+    uint32_t now = timer->tick();
+    ElapsedTime__resetTo(timer, now);
 }
