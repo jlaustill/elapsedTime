@@ -1,0 +1,7 @@
+{
+    "cppRequired": false,
+    "include": ["include/"],
+    "noCache": true,
+    "headerOut": "include",
+    "basePath": "src"
+}
