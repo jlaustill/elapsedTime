@@ -32,6 +32,33 @@ because `get_absolute_time()` returns a struct and `time_us_64()` a native u64.
 
 ---
 
+## Status — paused pending c-next v0.4.1 (as of 2026-09-20)
+
+Investigating G1 traced its root cause upstream. Three c-next issues were filed
+from this survey, all milestoned **V0.4.1**:
+
+| Issue | What it covers |
+| --- | --- |
+| [c-next#1619](https://github.com/jlaustill/c-next/issues/1619) | **G1's root cause.** E0879 is silent for a scope-declared callback type across an include — exactly this library's shape — and for any function from a C header. C-Next should have rejected `tick: millis` at transpile time on every platform. |
+| [c-next#1618](https://github.com/jlaustill/c-next/issues/1618) | ADR-024 conversions enforced per-position: 6 of 10 positions leak, and every position leaks from a C source. Found while checking whether the ESP-IDF `now[0, 32]` adapter was actually required — it is correct, but nothing would have forced it. |
+| [c-next#1620](https://github.com/jlaustill/c-next/issues/1620) | Why neither surfaced: adr-matrix occupancy is per-ADR rather than per-diagnostic, so one rule greens a cell for every code an ADR declares. |
+
+They join existing cards [#1523](https://github.com/jlaustill/c-next/issues/1523)
+and [#1524](https://github.com/jlaustill/c-next/issues/1524), which already
+identified the missing interop axis from the tooling side; the repros here are
+the concrete failing cells those asked for. All five are cross-linked.
+
+**Do not work G1 until v0.4.1 ships.** Whether `tickSource` keeps its `uint32_t`
+spelling is a genuine design choice, but it should be made against a transpiler
+that reports the mismatch rather than one that passes it to gcc. The wrapper
+workaround is verified to clear G1 in both languages on real ESP32 builds
+(C++ alone; C-Next needs the G2 shim as well) — it is not committed, because
+this branch is a record of gaps rather than of workarounds.
+
+G2–G6 are independent of the upstream fix and can be worked at any time.
+
+---
+
 ## G1 — `tick: millis` does not type-check on ESP32
 
 **Severity: blocking.** This is the README's headline usage, and it fails on one
