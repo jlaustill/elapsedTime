@@ -1,0 +1,25 @@
+// ESP32 (Arduino core) -- BlinkWithoutDelay with elapsedTime.
+//
+// The Arduino layer already truncates: micros() is (unsigned long)
+// esp_timer_get_time(), so the int64 never reaches us here.
+
+#include <Arduino.h>
+#include <ElapsedTime.cnx>
+
+const u8 LED_PIN <- 2;
+
+ElapsedTime.Timer blinkTimer <- { dueEvery: 1000, tick: millis };
+
+bool ledOn <- false;
+
+void setup() {
+    pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+    bool due <- ElapsedTime.isDue(blinkTimer);
+    if (due = true) {
+        ledOn <- !ledOn;
+        digitalWrite(LED_PIN, ledOn);
+    }
+}

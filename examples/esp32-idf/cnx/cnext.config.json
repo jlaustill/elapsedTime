@@ -1,0 +1,10 @@
+{
+    "cppRequired": false,
+    "include": [
+        "../../../src/",
+        "/home/linux/.platformio/packages/framework-espidf/components/esp_timer/include/",
+        "/home/linux/.platformio/packages/framework-espidf/components/freertos/FreeRTOS-Kernel/include/"
+    ],
+    "noCache": true,
+    "basePath": "src"
+}

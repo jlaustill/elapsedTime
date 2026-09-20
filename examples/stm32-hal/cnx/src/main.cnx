@@ -1,0 +1,16 @@
+// STM32 HAL -- the CubeMX blink, driven by elapsedTime instead of HAL_Delay.
+
+#include "stm32f4xx_hal.h"
+#include <ElapsedTime.cnx>
+
+ElapsedTime.Timer blinkTimer <- { dueEvery: 500, tick: HAL_GetTick };
+
+void main() {
+    (void) global.HAL_Init();
+    forever {
+        bool due <- ElapsedTime.isDue(blinkTimer);
+        if (due = true) {
+            global.HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+        }
+    }
+}

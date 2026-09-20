@@ -1,0 +1,31 @@
+// Teensy 4.0 -- BlinkWithoutDelay with elapsedTime.
+//
+// This is the library's own origin story. The Teensy core's elapsedMillis
+// would write the same blink as:
+//
+//     elapsedMillis sinceBlink;
+//     void loop() {
+//         if (sinceBlink > 1000) { sinceBlink = 0; toggle(); }
+//     }
+//
+// The differences: the interval lives with the timer instead of at the call
+// site, there is no reset to forget, and the same type serves microseconds.
+
+#include <Arduino.h>
+#include <ElapsedTime.cnx>
+
+ElapsedTime.Timer blinkTimer <- { dueEvery: 1000, tick: millis };
+
+bool ledOn <- false;
+
+void setup() {
+    pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+    bool due <- ElapsedTime.isDue(blinkTimer);
+    if (due = true) {
+        ledOn <- !ledOn;
+        digitalWrite(LED_BUILTIN, ledOn);
+    }
+}

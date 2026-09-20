@@ -1,0 +1,27 @@
+// ESP-IDF native -- periodic work driven by elapsedTime.
+//
+// ESP-IDF has no u32 clock: esp_timer_get_time() returns int64_t microseconds.
+// The Arduino layer hides this by truncating (micros() is literally
+// (unsigned long)esp_timer_get_time()); here we face it directly.
+
+#include <stdio.h>
+#include <esp_timer.h>
+#include <ElapsedTime.cnx>
+
+// The adapter: a 64-bit clock narrowed to the u32 the library takes.
+u32 microseconds() {
+    i64 now <- global.esp_timer_get_time();
+    return now[0, 32];
+}
+
+ElapsedTime.Timer everySecond <- { dueEvery: 1000000, tick: microseconds };
+
+void app_main() {
+    forever {
+        bool due <- ElapsedTime.isDue(everySecond);
+        if (due = true) {
+            u64 total <- ElapsedTime.elapsed(everySecond);
+            (void) printf("tick, %llu us elapsed\n", total);
+        }
+    }
+}

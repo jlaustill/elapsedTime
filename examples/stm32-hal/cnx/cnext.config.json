@@ -1,0 +1,12 @@
+{
+    "cppRequired": false,
+    "include": [
+        "../../../src/",
+        "/home/linux/.platformio/packages/framework-stm32cubef4/Drivers/STM32F4xx_HAL_Driver/Inc/",
+        "/home/linux/.platformio/packages/framework-stm32cubef4/Drivers/CMSIS/Device/ST/STM32F4xx/Include/",
+        "/home/linux/.platformio/packages/framework-stm32cubef4/Drivers/CMSIS/Include/"
+    ],
+    "defines": { "STM32F401xE": true, "USE_HAL_DRIVER": true },
+    "noCache": true,
+    "basePath": "src"
+}

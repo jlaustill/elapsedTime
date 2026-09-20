@@ -1,2 +1,5 @@
 # PlatformIO build output and downloaded dependencies.
 .pio/
+
+# ESP-IDF regenerates these per build.
+sdkconfig.*
