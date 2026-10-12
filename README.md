@@ -3,7 +3,7 @@
 Portable, tick-agnostic elapsed-time timers for [C-Next](https://github.com/jlaustill/c-next) — the ergonomics behind Teensy's `elapsedMillis`, for **any MCU**, **any tick source**, and with **no 49.7-day ceiling**.
 
 > **Status: implemented, 22/22 tests passing.** Requires a C-Next build from
-> `main`; the released `0.3.0` cannot transpile it — see
+> `main`; no release yet generates the same code — see
 > [Requirements](#requirements).
 
 ## Why
@@ -121,7 +121,7 @@ if (now >= startedAtTick) { return now - startedAtTick; }
 return (4294967295 - startedAtTick) + now + 1;
 ```
 
-That expression cannot overflow: the second branch runs only when `now < startedAtTick`, so its result is at most `4294967295` exactly.
+That expression cannot overflow: the second branch runs only when `now < startedAtTick`, so its result is at most `4294967295` exactly. C-Next still wraps the arithmetic in its saturating `cnx_clamp_*` helpers. By that bound they never fire, and they stay anyway: if the branch is ever wrong, a reading that saturates fails safer than one that wraps.
 
 **`isDue` advances before the handler runs, and that ordering is the design.** It reads the clock once, and if the interval has elapsed it folds and advances *before* returning `true` — so the caller's handler executes on already-advanced state and its duration cannot push the next firing:
 
@@ -160,12 +160,16 @@ Firings land at 250, 500, 750. The same two statements in the other order drift 
 
 ## Requirements
 
-**C-Next from `main`.** The latest release, `0.3.0`, cannot transpile this library, and no release yet carries what it needs:
+**C-Next from `main`.** `0.3.0` cannot transpile this library:
 
 - [c-next#1207](https://github.com/jlaustill/c-next/pull/1207) (merged after `0.3.0` was cut) — a function-as-type field in a scope-nested struct emitted no function-pointer typedef, so the generated C did not compile.
 - `tickSource` living *inside* the scope and referenced bare from `Timer` in that same scope. The header must emit `ElapsedTime__tickSource_fp`; earlier builds emitted a raw name that is not a type. Opened as [c-next#1281](https://github.com/jlaustill/c-next/pull/1281), which was closed unmerged after being blocked on [#1285](https://github.com/jlaustill/c-next/issues/1285); the fix reached `main` through that refactor instead.
 
-The committed `.c`/`.h` were generated from `main`, and regenerating from `main` reproduces them byte for byte.
+`0.3.1` carries both fixes and transpiles it, but generates different code from `main`: it leaves the `u64` fold `total +<- since` unclamped, where `main` emits `cnx_clamp_add_u64`. Until a release matches `main`, regenerate from `main`.
+
+The committed `.c`/`.h` were generated from C-Next `main` at [`bb82564`](https://github.com/jlaustill/c-next/commit/bb82564c27dd66ced19312ea89866687da48ab97), and regenerating reproduces them byte for byte.
+
+**One set of generated files serves every target.** ADR-049 has every program name exactly one target, so `cnext.config.json` names `host`, which matches the native test suite. Here the choice changes nothing: generating for each of the 13 targets C-Next knows (`host`, AVR, ESP32, Cortex-M0 through M7, STM32F4, Teensy 4.x) gives a byte-identical `.c` and `.h`, because the library uses nothing target-specific. If that changes — an `atomic` tick, say — the output will differ per target, and the library will ship one set per target.
 
 Two further defects found while designing this shaped the API rather than blocking it:
 

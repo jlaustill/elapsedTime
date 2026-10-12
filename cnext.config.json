@@ -1,5 +1,6 @@
 {
     "cppRequired": false,
+    "target": "host",
     "include": ["include/"],
     "noCache": true,
     "headerOut": "include",

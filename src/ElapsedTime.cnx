@@ -35,7 +35,9 @@ scope ElapsedTime {
     // full wrap period. So the wrap is one visible branch.
     //
     // Cannot overflow: the second branch runs only when now < base, so the
-    // result is at most 4294967295 exactly.
+    // result is at most 4294967295 exactly. The clamp helpers C-Next emits
+    // around it therefore never fire, and they stay: if this branch is ever
+    // wrong, a reading that saturates fails safer than one that wraps.
     private u32 sinceTick(u32 base, u32 now) {
         if (now >= base) {
             return now - base;
