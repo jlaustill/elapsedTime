@@ -3,7 +3,7 @@
 Portable, tick-agnostic elapsed-time timers for [C-Next](https://github.com/jlaustill/c-next) — the ergonomics behind Teensy's `elapsedMillis`, for **any MCU**, **any tick source**, and with **no 49.7-day ceiling**.
 
 > **Status: implemented, 30/30 tests passing.** Requires a C-Next build from
-> `main`; no release yet generates the same code — see
+> `main`; no release yet transpiles it — see
 > [Requirements](#requirements).
 
 ## Why
@@ -188,9 +188,9 @@ Both limits are half the tick's range: 2^31 on a full `u32` tick, which is 24.8 
 - [c-next#1207](https://github.com/jlaustill/c-next/pull/1207) (merged after `0.3.0` was cut) — a function-as-type field in a scope-nested struct emitted no function-pointer typedef, so the generated C did not compile.
 - `tickSource` living *inside* the scope and referenced bare from `Timer` in that same scope. The header must emit `ElapsedTime__tickSource_fp`; earlier builds emitted a raw name that is not a type. Opened as [c-next#1281](https://github.com/jlaustill/c-next/pull/1281), which was closed unmerged after being blocked on [#1285](https://github.com/jlaustill/c-next/issues/1285); the fix reached `main` through that refactor instead.
 
-`0.3.1` carries both fixes and transpiles it, but generates different code from `main`: it leaves the `u64` fold `total +<- since` unclamped, where `main` emits `cnx_clamp_add_u64`. Until a release matches `main`, regenerate from `main`.
+`0.3.1` carries both fixes, but it cannot transpile this library either. It rejects every parenthesized comparison in a condition with E0701 ([c-next#1195](https://github.com/jlaustill/c-next/issues/1195)), and `tickCeiling` writes `if ((width = 0) || (width >= 32))`. That was fixed on `main` by [c-next#2021](https://github.com/jlaustill/c-next/pull/2021), which no release carries yet. `0.3.1` also leaves the `u64` fold `total +<- since` unclamped, where `main` emits `cnx_clamp_add_u64`. Until a release matches `main`, regenerate from `main`.
 
-**And, for now, the fix for [c-next#1195](https://github.com/jlaustill/c-next/issues/1195), which is not on `main` yet.** C-Next rejects any parenthesized comparison in a condition with E0701, and `tickCeiling` writes `if ((width = 0) || (width >= 32))`. The committed `.c`/`.h` were generated from C-Next `main` at [`bb82564`](https://github.com/jlaustill/c-next/commit/bb82564c27dd66ced19312ea89866687da48ab97) with that fix applied, and regenerating that way reproduces them byte for byte.
+The committed `.c`/`.h` were generated from C-Next `main` at [`cb21e1c`](https://github.com/jlaustill/c-next/commit/cb21e1c99648e825b8cfb804a43c6983984e2c46), and regenerating reproduces them byte for byte.
 
 **One set of generated files serves every target.** ADR-049 has every program name exactly one target, so `cnext.config.json` names `host`, which matches the native test suite. Here the choice changes nothing: generating for each of the 13 targets C-Next knows (`host`, AVR, ESP32, Cortex-M0 through M7, STM32F4, Teensy 4.x) gives a byte-identical `.c` and `.h`, because the library uses nothing target-specific. If that changes — an `atomic` tick, say — the output will differ per target, and the library will ship one set per target.
 
