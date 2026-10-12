@@ -2,7 +2,7 @@
 
 Portable, tick-agnostic elapsed-time timers for [C-Next](https://github.com/jlaustill/c-next) — the ergonomics behind Teensy's `elapsedMillis`, for **any MCU**, **any tick source**, and with **no 49.7-day ceiling**.
 
-> **Status: implemented, 22/22 tests passing.** Requires a C-Next build from
+> **Status: implemented, 30/30 tests passing.** Requires a C-Next build from
 > `main`; no release yet generates the same code — see
 > [Requirements](#requirements).
 
@@ -43,7 +43,7 @@ That declaration is the whole setup. There is no constructor, no `setup()` step 
 
 (Two lines rather than one because C-Next forbids a function call inside an `if` condition — MISRA C:2012 Rule 13.5, `E0702`.)
 
-Uptime past 49.7 days needs nothing extra — folding is internal and automatic:
+Uptime past 49.7 days needs no extra call — folding is internal and automatic, as long as the timer is read at least once per half range of its tick (see [Constraints](#constraints)):
 
 ```cnx
 u64 uptime <- ElapsedTime.elapsed(elapsedSystemTime);
@@ -57,12 +57,29 @@ The clock is a caller-supplied callback, so the library never names a platform:
 | --- | --- |
 | Arduino (AVR, ESP32, STM32, RP2040, SAMD, Teensy) | `millis()` / `micros()` |
 | STM32 HAL | `HAL_GetTick()` — same type, same units, same wrap |
-| FreeRTOS | `xTaskGetTickCount()` via a `u32` wrapper |
+| FreeRTOS | `xTaskGetTickCount()` via a `u32` wrapper, plus `tickBitWidth: 16` under `configUSE_16_BIT_TICKS` |
 | Zephyr | `k_cycle_get_32()` |
 | Cortex-M3/M4/M7 | `DWT->CYCCNT` |
 | Host tests | a fake clock you advance by hand |
 
 It also means the library is not embedded-specific at all. Nothing in it names a framework, so it builds and runs on a host — the entire test suite runs natively against a fake clock, no board and no cross-compiler involved. A desktop application, a server, a game loop or a wasm build can use it exactly as an MCU does.
+
+### A tick narrower than 32 bits
+
+The library expects a tick that counts all the way to `4294967295` before wrapping to 0. A tick that wraps sooner — a 16-bit hardware timer, a 24-bit counter, a timer with an auto-reload — must declare its range beside its clock. Otherwise its first wrap reports an elapsed time billions of ticks too long. Declare it whichever way is natural:
+
+```cnx
+ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
+ElapsedTime.Timer frame  <- { dueEvery: 10,  tick: tim2Count,   tickMaxValue: 999 };  // ARR = 999
+```
+
+- **`tickBitWidth`** covers a counter that wraps at a power of two: 8, 16, 24. `0`, and anything from 32 up, means the full `u32` range.
+- **`tickMaxValue`** is the last value before the wrap, and covers the rest: a timer that reloads at 999 counts 0..999. `0` means the full `u32` range.
+- **If both are set, `tickMaxValue` wins**, because it is the more exact of the two.
+
+A narrow tick tightens the two limits that scale with the range (see [Constraints](#constraints)). An 8-bit tick at 1 kHz must be read at least every 128 ms, and its `dueEvery` must stay below 128.
+
+The tick must also count *up*. ARM SysTick's `VAL` counts down from its reload value, so a range alone does not fix it: wrap it as `reload - SysTick->VAL` and declare `tickMaxValue: reload`.
 
 ### The tick need not be a clock
 
@@ -92,6 +109,8 @@ scope ElapsedTime {
     public struct Timer {
         u32 dueEvery;        // isDue interval; 0 = never due
         tickSource tick;     // the clock
+        u32 tickMaxValue;    // the tick's last value before it wraps; 0 = u32 max
+        u8  tickBitWidth;    // or its width in bits; 0 = 32
         u64 total;           // internal -- folded elapsed
         u32 startedAtTick;   // internal -- origin of the current interval
         bool started;        // internal -- false until the first touch
@@ -106,7 +125,7 @@ scope ElapsedTime {
 }
 ```
 
-Only the first two fields are ever written at a call site; the rest zero-fill (C99 6.7.9p21). Field order is deliberate — the struct reads in the order it is typed. It is three bytes smaller than the proof of concept's: `started` adds one, deleting `rollOverAt` removes four.
+Only the first fields are ever written at a call site — `dueEvery` and `tick`, plus `tickMaxValue` or `tickBitWidth` for a narrow tick; the rest zero-fill (C99 6.7.9p21). Field order is deliberate — the struct reads in the order it is typed. It is two bytes larger than the proof of concept's: `started` adds one and the tick's range five, while deleting `rollOverAt` removes four.
 
 ## Design notes
 
@@ -114,14 +133,14 @@ Only the first two fields are ever written at a call site; the rest zero-fill (C
 
 **A timer seeds itself on first touch.** C-Next has no constructors (ADR-005) and a global's initializer must be a compile-time constant, so a timer cannot capture `millis()` where it is declared. A timer left at `startedAtTick: 0` while the clock already reads 40,000 would fire immediately and report 40 seconds that never elapsed. The internal `started` flag is false until the first call, which seeds the origin from the clock and reports not-yet; the first firing lands one full interval later. Seeding lives in one private function, so `isDue` and `elapsed` cannot disagree about what a fresh timer means.
 
-**Wrap handling is one visible branch**, not a property of the arithmetic. Every `u32` tick source wraps — 49.7 days at milliseconds, 71.6 minutes at microseconds. Teensy's version stays correct across that only because C's unsigned subtraction wraps; C-Next defaults to clamp arithmetic, which saturates instead and would stall every timer for a full wrap period. So it is explicit:
+**Wrap handling is one visible branch**, not a property of the arithmetic. Every tick wraps — a `u32` one at 49.7 days of milliseconds or 71.6 minutes of microseconds, a narrower one far sooner. Teensy's version stays correct across that only because C's unsigned subtraction wraps; C-Next defaults to clamp arithmetic, which saturates instead and would stall every timer for a full wrap period. So it is explicit, and it counts up to the tick's own ceiling — `4294967295` unless the timer declares a narrower range:
 
 ```cnx
 if (now >= startedAtTick) { return now - startedAtTick; }
-return (4294967295 - startedAtTick) + now + 1;
+return (ceiling - startedAtTick) + now + 1;
 ```
 
-That expression cannot overflow: the second branch runs only when `now < startedAtTick`, so its result is at most `4294967295` exactly. C-Next still wraps the arithmetic in its saturating `cnx_clamp_*` helpers. By that bound they never fire, and they stay anyway: if the branch is ever wrong, a reading that saturates fails safer than one that wraps.
+That expression cannot overflow: the second branch runs only when `now < startedAtTick`, so its result is at most `ceiling` exactly. The `+ 1` is the step from the ceiling back to 0: `250` to `5` on an 8-bit tick is 11 ticks, not 10. C-Next still wraps the arithmetic in its saturating `cnx_clamp_*` helpers. By that bound they never fire, and they stay anyway: if the branch is ever wrong, or a tick reads above the range it declared, a reading that saturates fails safer than one that wraps.
 
 **`isDue` advances before the handler runs, and that ordering is the design.** It reads the clock once, and if the interval has elapsed it folds and advances *before* returning `true` — so the caller's handler executes on already-advanced state and its duration cannot push the next firing:
 
@@ -140,9 +159,9 @@ Firings land at 250, 500, 750. The same two statements in the other order drift 
 
 **`isDue` folds rather than resets**, so `elapsed()` stays a true cumulative on a polled timer. `reset()` would zero `total` and leave `elapsed()` permanently near zero on anything periodic.
 
-**Overflow handling is automatic and private.** The proof of concept made the caller run `handleOverflow()` periodically to push past the 49.7-day ceiling — a step a user can forget, and forgetting it was silent. Folding now happens inside the accessors at a fixed **2^31** threshold: 24.8 days of margin at milliseconds, 35.8 minutes at microseconds, for one `u64` add per 2^31 ticks. It is also the cheapest threshold to test — `since >= 0x80000000` is "is bit 31 set", a single high-byte test on AVR rather than a four-byte comparison. The fold restarts the interval from the same tick reading, so the intervals abut exactly and **no time is lost at the boundary**.
+**Overflow handling is automatic and private.** The proof of concept made the caller run `handleOverflow()` periodically to push past the 49.7-day ceiling — a step a user can forget, and forgetting it was silent. Folding now happens inside the accessors at **half the tick's range** — 2^31 on a full `u32` tick, which is 24.8 days at milliseconds and 35.8 minutes at microseconds; 128 on an 8-bit tick — for one `u64` add per fold. The threshold has to follow the range: at a fixed 2^31 a narrow tick would never fold, and would lose a whole range on every wrap. The fold restarts the interval from the same tick reading, so the intervals abut exactly and **no time is lost at the boundary**.
 
-**`isDue` deliberately omits that safety fold, and the paths must not be unified.** A working periodic timer folds on every firing and never approaches 2^31, so the safety fold would buy nothing there — and it would actively *break* long intervals: `since` would fold to zero while still short of `dueEvery`, and the timer would never fire at all. A test pins this by polling a long interval late, past both the interval and the threshold; polling on time cannot detect the difference.
+**`isDue` deliberately omits that safety fold, and the paths must not be unified.** A working periodic timer folds on every firing and never approaches the threshold, so the safety fold would buy nothing there — and it would actively *break* long intervals: `since` would fold to zero while still short of `dueEvery`, and the timer would never fire at all. A test pins this by polling a long interval late, past both the interval and the threshold; polling on time cannot detect the difference.
 
 **`hasElapsed` runs on the `u64`.** It tests total elapsed against a threshold without advancing the timer, which serves one-shots that have no `dueEvery`. It is not a cheap `u32` path — "elapsed since reset" is `total + since`, inherently `u64`. The justification is reach: a `u64` of milliseconds tops out 584 million years away, so a threshold of a year is a legitimate call on hardware that will never reach its own ceiling.
 
@@ -154,9 +173,13 @@ Firings land at 250, 500, 750. The same two statements in the other order drift 
 
 **Each timer is independent.** A module in another file owns its own timer, and nothing is shared, so nothing coordinates.
 
-### Constraint
+### Constraints
 
-**`dueEvery` must stay below 2^31** — 24.8 days at milliseconds, 35.8 minutes at microseconds. Above that the safety fold and the due check fight, per the note above. `hasElapsed` is the right tool for longer intervals: it runs on the `u64` and tops out 584 million years away.
+Both limits are half the tick's range: 2^31 on a full `u32` tick, which is 24.8 days at milliseconds and 35.8 minutes at microseconds, and 128 on an 8-bit tick.
+
+**`dueEvery` must stay below half the range.** Above that the safety fold and the due check fight, per the note above. `hasElapsed` is the right tool for longer intervals: it runs on the `u64` and tops out 584 million years away.
+
+**A timer must be read at least once per half range.** The wrap branch can only measure a distance shorter than one range, and a timer read just under the fold threshold has only half a range left before that. A longer gap between reads loses a whole range, and nothing can detect it. On an 8-bit tick, a read at 127 followed by one 129 ticks later reports 0 instead of 256.
 
 ## Requirements
 
@@ -167,7 +190,7 @@ Firings land at 250, 500, 750. The same two statements in the other order drift 
 
 `0.3.1` carries both fixes and transpiles it, but generates different code from `main`: it leaves the `u64` fold `total +<- since` unclamped, where `main` emits `cnx_clamp_add_u64`. Until a release matches `main`, regenerate from `main`.
 
-The committed `.c`/`.h` were generated from C-Next `main` at [`bb82564`](https://github.com/jlaustill/c-next/commit/bb82564c27dd66ced19312ea89866687da48ab97), and regenerating reproduces them byte for byte.
+**And, for now, the fix for [c-next#1195](https://github.com/jlaustill/c-next/issues/1195), which is not on `main` yet.** C-Next rejects any parenthesized comparison in a condition with E0701, and `tickCeiling` writes `if ((width = 0) || (width >= 32))`. The committed `.c`/`.h` were generated from C-Next `main` at [`bb82564`](https://github.com/jlaustill/c-next/commit/bb82564c27dd66ced19312ea89866687da48ab97) with that fix applied, and regenerating that way reproduces them byte for byte.
 
 **One set of generated files serves every target.** ADR-049 has every program name exactly one target, so `cnext.config.json` names `host`, which matches the native test suite. Here the choice changes nothing: generating for each of the 13 targets C-Next knows (`host`, AVR, ESP32, Cortex-M0 through M7, STM32F4, Teensy 4.x) gives a byte-identical `.c` and `.h`, because the library uses nothing target-specific. If that changes — an `atomic` tick, say — the output will differ per target, and the library will ship one set per target.
 
@@ -182,7 +205,7 @@ Two further defects found while designing this shaped the API rather than blocki
 pio test -e native
 ```
 
-22 tests against a clock the suite drives by hand, so every assertion is exact rather than approximate. The cases that carry the design:
+30 tests against a clock the suite drives by hand, so every assertion is exact rather than approximate. The cases that carry the design:
 
 | Test | What it pins |
 | --- | --- |
@@ -196,8 +219,10 @@ pio test -e native
 | `long_stall_fires_once_not_once_per_missed_slot` | 1000 ms past due yields **one** firing, not four |
 | `has_elapsed_does_not_advance_the_timer` | asking twice gives the same answer — what separates it from `isDue` |
 | `fires_across_a_clock_wrap` | both sides of the boundary, 249 false and 250 true, spanning the ceiling |
+| `a_16_bit_tick_measures_across_its_own_wrap` | 65000 to 100 on a declared 16-bit tick is 636, not 4294902396 |
+| `elapsed_is_unbounded_on_a_narrow_tick` | the fold follows the range: 10,000 reads of an 8-bit tick add up to exactly 1,000,000 |
 
-Two of these were verified by mutation rather than assumed. The implementation was deliberately broken in the way each test exists to catch — advancing by one interval instead of to now, and giving `isDue` the safety fold — and in each case exactly one test failed, the right one. The second mutation is what caught the *first* version of `a_long_interval_polled_late_still_fires`, which polled on time and so passed against both the correct and the broken implementation.
+Three of these were verified by mutation rather than assumed. The implementation was deliberately broken in the way each test exists to catch — advancing by one interval instead of to now, giving `isDue` the safety fold, and folding at a fixed 2^31 instead of half the tick's range — and in each case exactly one test failed, the right one. The second mutation is what caught the *first* version of `a_long_interval_polled_late_still_fires`, which polled on time and so passed against both the correct and the broken implementation.
 
 ## Licence
 

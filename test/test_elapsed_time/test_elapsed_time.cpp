@@ -291,6 +291,101 @@ void test_counter_wrap_behaves_like_a_clock_wrap(void) {
     TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));            // 10 counted
 }
 
+// -------------------------------------------- a tick narrower than 32 bits
+//
+// A tick that wraps below 2^32 declares its range beside its clock, either way:
+//
+//     ElapsedTime.Timer t <- { tick: timer1Count, tickMaxValue: 65535 };
+//     ElapsedTime.Timer t <- { tick: timer1Count, tickBitWidth: 16 };
+
+// Without the range, the wrap branch counts all the way up to 4294967295
+// before starting over: 65000 to 100 on a 16-bit counter is 636 ticks, and the
+// library reported 4294902396.
+void test_a_16_bit_tick_measures_across_its_own_wrap(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickMaxValue = 65535u;
+    fakeNow = 65000u; ElapsedTime__elapsed(&t);          // seeds
+    fakeNow = 100u;
+    TEST_ASSERT_EQUAL_UINT64(636u, ElapsedTime__elapsed(&t));
+}
+
+void test_a_bit_width_declares_the_same_range_as_a_max_value(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickBitWidth = 16;
+    fakeNow = 65000u; ElapsedTime__elapsed(&t);
+    fakeNow = 100u;
+    TEST_ASSERT_EQUAL_UINT64(636u, ElapsedTime__elapsed(&t));
+}
+
+// 250 to 5 on an 8-bit tick: 5 to the top, 1 across the wrap, 5 after. The 1 is
+// the step from 255 back to 0, and dropping it reports 10.
+void test_an_8_bit_tick_counts_the_step_across_the_wrap(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickBitWidth = 8;
+    fakeNow = 250u; ElapsedTime__elapsed(&t);
+    fakeNow = 5u;
+    TEST_ASSERT_EQUAL_UINT64(11u, ElapsedTime__elapsed(&t));
+}
+
+// A hardware timer with auto-reload 999 counts 0..999 -- a range no bit width
+// can express, which is why the max value exists alongside the width.
+void test_a_range_that_is_not_a_power_of_two(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickMaxValue = 999u;
+    fakeNow = 990u; ElapsedTime__elapsed(&t);
+    fakeNow = 5u;
+    TEST_ASSERT_EQUAL_UINT64(15u, ElapsedTime__elapsed(&t));
+}
+
+// Declaring both is a contradiction resolved one documented way: the max value
+// is the more exact of the two, so it wins. Width 16 would report 64551 here.
+void test_the_max_value_wins_when_both_are_declared(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickMaxValue = 999u;
+    t.tickBitWidth = 16;
+    fakeNow = 990u; ElapsedTime__elapsed(&t);
+    fakeNow = 5u;
+    TEST_ASSERT_EQUAL_UINT64(15u, ElapsedTime__elapsed(&t));
+}
+
+// 32 is the default spelled out, and a u32 tick cannot be wider, so a width
+// above 32 means the full range too rather than an out-of-range shift.
+void test_a_bit_width_of_32_or_more_is_the_full_u32_range(void) {
+    ElapsedTime__Timer exact = makeTimer();
+    exact.tickBitWidth = 32;
+    ElapsedTime__Timer wider = makeTimer();
+    wider.tickBitWidth = 40;
+    fakeNow = 4294967200u;
+    ElapsedTime__elapsed(&exact);
+    ElapsedTime__elapsed(&wider);
+    fakeNow = 100u;                                      // 95 + 1 + 100
+    TEST_ASSERT_EQUAL_UINT64(196u, ElapsedTime__elapsed(&exact));
+    TEST_ASSERT_EQUAL_UINT64(196u, ElapsedTime__elapsed(&wider));
+}
+
+// The safety fold must scale with the range. At a fixed 2^31 an 8-bit tick
+// never reaches the threshold, never folds, and loses 256 ticks on every wrap
+// -- elapsed() would never read past 255.
+void test_elapsed_is_unbounded_on_a_narrow_tick(void) {
+    ElapsedTime__Timer t = makeTimer();
+    t.tickBitWidth = 8;
+    fakeNow = 0; ElapsedTime__elapsed(&t);
+    for (int step = 0; step < 10000; step++) {
+        fakeNow = (fakeNow + 100u) % 256u;               // polled inside one wrap
+        ElapsedTime__elapsed(&t);
+    }
+    TEST_ASSERT_EQUAL_UINT64(1000000u, ElapsedTime__elapsed(&t));
+}
+
+void test_is_due_fires_across_a_narrow_wrap(void) {
+    ElapsedTime__Timer t = makeTimer(100);
+    t.tickBitWidth = 8;
+    fakeNow = 200u; ElapsedTime__isDue(&t);                     // seeds
+    // 55 to the top, +1 across it, +43 after = 99 -- one short.
+    fakeNow = 43u; TEST_ASSERT_FALSE(ElapsedTime__isDue(&t));
+    fakeNow = 44u; TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_fresh_timer_against_a_running_clock_reports_no_elapsed_time);
@@ -315,5 +410,13 @@ int main(int, char **) {
     RUN_TEST(test_a_long_interval_polled_late_still_fires);
     RUN_TEST(test_counts_executions_when_the_tick_is_a_counter);
     RUN_TEST(test_counter_wrap_behaves_like_a_clock_wrap);
+    RUN_TEST(test_a_16_bit_tick_measures_across_its_own_wrap);
+    RUN_TEST(test_a_bit_width_declares_the_same_range_as_a_max_value);
+    RUN_TEST(test_an_8_bit_tick_counts_the_step_across_the_wrap);
+    RUN_TEST(test_a_range_that_is_not_a_power_of_two);
+    RUN_TEST(test_the_max_value_wins_when_both_are_declared);
+    RUN_TEST(test_a_bit_width_of_32_or_more_is_the_full_u32_range);
+    RUN_TEST(test_elapsed_is_unbounded_on_a_narrow_tick);
+    RUN_TEST(test_is_due_fires_across_a_narrow_wrap);
     return UNITY_END();
 }

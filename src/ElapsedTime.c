@@ -41,11 +41,23 @@ uint32_t ElapsedTime__tickSource(void) {
     return 0U;
 }
 
-static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
+static uint32_t ElapsedTime__tickCeiling(const ElapsedTime__Timer* timer) {
+    if (timer->tickMaxValue != 0) {
+        return timer->tickMaxValue;
+    }
+    uint8_t width = timer->tickBitWidth;
+    if ((width == 0) || (width >= 32)) {
+        return 4294967295U;
+    }
+    uint32_t one = 1U;
+    return cnx_clamp_sub_u32((one << width), 1U);
+}
+
+static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now, uint32_t ceiling) {
     if (now >= base) {
         return cnx_clamp_sub_u32(now, base);
     }
-    return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(4294967295U, base)), now), 1U);
+    return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(ceiling, base)), now), 1U);
 }
 
 static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
@@ -54,7 +66,8 @@ static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
         timer->startedAtTick = now;
         return 0U;
     }
-    return ElapsedTime__sinceTick(timer->startedAtTick, now);
+    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    return ElapsedTime__sinceTick(timer->startedAtTick, now, ceiling);
 }
 
 bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
@@ -73,7 +86,9 @@ bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
 
 static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
     uint32_t since = ElapsedTime__sinceNow(timer, now);
-    if (since >= 2147483648) {
+    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    uint32_t foldAt = cnx_clamp_add_u32((ceiling >> 1U), 1U);
+    if (since >= foldAt) {
         timer->total = cnx_clamp_add_u64(timer->total, since);
         timer->startedAtTick = now;
         uint64_t folded = timer->total;
