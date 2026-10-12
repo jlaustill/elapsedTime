@@ -16,6 +16,11 @@
    the check: cnx_clamp_add_u8(0, 256) must saturate to 255, but (uint8_t)256 is 0, so a
    uint8_t parameter would return 0 -- the opposite of saturation. */
 
+static inline uint32_t cnx_clamp_add_u32(uint32_t a, uint64_t b) {
+    if (b > (uint64_t)(UINT32_MAX - a)) return UINT32_MAX;
+    return (uint32_t)(a + (uint32_t)b);
+}
+
 static inline uint64_t cnx_clamp_add_u64(uint64_t a, uint64_t b) {
     if (b > (uint64_t)(UINT64_MAX - a)) return UINT64_MAX;
     return (uint64_t)(a + (uint64_t)b);
@@ -38,9 +43,9 @@ uint32_t ElapsedTime__tickSource(void) {
 
 static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
     if (now >= base) {
-        return now - base;
+        return cnx_clamp_sub_u32(now, base);
     }
-    return (4294967295U - base) + now + 1U;
+    return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(4294967295U, base)), now), 1U);
 }
 
 static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
@@ -61,7 +66,7 @@ bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
     if (since < timer->dueEvery) {
         return false;
     }
-    timer->total += since;
+    timer->total = cnx_clamp_add_u64(timer->total, since);
     timer->startedAtTick = now;
     return true;
 }
@@ -69,7 +74,7 @@ bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
 static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
     uint32_t since = ElapsedTime__sinceNow(timer, now);
     if (since >= 2147483648) {
-        timer->total += since;
+        timer->total = cnx_clamp_add_u64(timer->total, since);
         timer->startedAtTick = now;
         uint64_t folded = timer->total;
         return folded;
