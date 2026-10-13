@@ -23,6 +23,7 @@ typedef struct ElapsedTime__Timer {
     uint32_t tickMaxValue;
     uint8_t tickBitWidth;
     uint64_t total;
+    uint64_t lastFiredAt;
     uint32_t startedAtTick;
     bool started;
 } ElapsedTime__Timer;

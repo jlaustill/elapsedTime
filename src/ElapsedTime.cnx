@@ -29,6 +29,7 @@ scope ElapsedTime {
         u32 tickMaxValue;       // the tick's last value before it wraps; 0 means u32 max
         u8 tickBitWidth;        // or its width in bits; 0 means 32
         u64 total;              // internal -- elapsed folded in by earlier folds
+        u64 lastFiredAt;        // internal -- elapsed() when isDue last fired
         u32 startedAtTick;      // internal -- origin of the current interval
         bool started;           // internal -- false until the first touch
     }
@@ -47,6 +48,8 @@ scope ElapsedTime {
         if ((width = 0) || (width >= 32)) {
             return 4294967295;
         }
+        // A typed u32, not a literal: c-next clamps (one << width) - 1 but not
+        // (1 << width) - 1. TODO(c-next#2040): inline the literal once it does.
         u32 one <- 1;
         return (one << width) - 1;
     }
@@ -91,39 +94,6 @@ scope ElapsedTime {
         return sinceTick(timer.startedAtTick, now, ceiling);
     }
 
-    // Is the interval up? If so, advance the timer and say true.
-    //
-    // dueEvery 0 means never due, not always due: a zero-initialised timer
-    // firing on every call would be a trap, and 0 >= 0 holds for unsigned.
-    //
-    // The advance happens BEFORE returning true, so the caller's handler runs
-    // on already-advanced state and its duration cannot push the next firing.
-    // These same statements in the other order drift by the handler's duration
-    // on every firing.
-    //
-    // It advances to now rather than by exactly one interval. Advancing by the
-    // interval either silently skips a slot or fires repeatedly to catch up
-    // when a handler outruns its interval; advancing to now does neither, and
-    // self-limits to the handler's real rate.
-    //
-    // Folds rather than resets, so elapsed() stays a true cumulative on a
-    // polled timer instead of being zeroed on every firing.
-    public bool isDue(Timer timer) {
-        if (timer.dueEvery = 0) {
-            return false;
-        }
-
-        u32 now <- timer.tick();
-        u32 since <- sinceNow(timer, now);
-        if (since < timer.dueEvery) {
-            return false;
-        }
-
-        timer.total +<- since;
-        timer.startedAtTick <- now;
-        return true;
-    }
-
     // The u64 cumulative, folding first when the un-drained interval comes
     // within reach of the tick's ceiling.
     //
@@ -147,6 +117,52 @@ scope ElapsedTime {
         }
         u64 accumulated <- timer.total;
         return accumulated + since;
+    }
+
+    // Ticks since isDue last fired, measured on the u64 cumulative.
+    //
+    // The cumulative is the one quantity a safety fold keeps exact, so no read
+    // of the timer -- elapsed(), hasElapsed(), or isDue itself -- can restart
+    // the interval behind isDue's back. And it is not bounded by the tick's
+    // range: a narrow tick's `since` never exceeds its ceiling, so a due check
+    // on `since` could never reach a dueEvery at or above the range.
+    private u64 sinceFiring(Timer timer) {
+        u32 now <- timer.tick();
+        u64 elapsedNow <- valueAt(timer, now);
+        return elapsedNow - timer.lastFiredAt;
+    }
+
+    // Is the interval up? If so, advance the timer and say true.
+    //
+    // dueEvery 0 means never due, not always due: a zero-initialised timer
+    // firing on every call would be a trap, and 0 >= 0 holds for unsigned.
+    //
+    // The advance happens BEFORE returning true, so the caller's handler runs
+    // on already-advanced state and its duration cannot push the next firing.
+    // These same statements in the other order drift by the handler's duration
+    // on every firing.
+    //
+    // It advances to now rather than by exactly one interval. Advancing by the
+    // interval either silently skips a slot or fires repeatedly to catch up
+    // when a handler outruns its interval; advancing to now does neither, and
+    // self-limits to the handler's real rate.
+    //
+    // Firing records where the cumulative stood rather than moving the origin,
+    // so elapsed() stays a true cumulative on a polled timer instead of being
+    // zeroed on every firing.
+    public bool isDue(Timer timer) {
+        if (timer.dueEvery = 0) {
+            return false;
+        }
+
+        u64 since <- sinceFiring(timer);
+        u64 interval <- timer.dueEvery;
+        if (since < interval) {
+            return false;
+        }
+
+        timer.lastFiredAt +<- since;
+        return true;
     }
 
     // Total elapsed since the timer started, unbounded.
@@ -186,21 +202,25 @@ scope ElapsedTime {
             return 4294967295;
         }
 
-        u32 now <- timer.tick();
-        u32 since <- sinceNow(timer, now);
-        if (since >= timer.dueEvery) {
+        u64 since <- sinceFiring(timer);
+        u64 interval <- timer.dueEvery;
+        if (since >= interval) {
             return 0;
         }
-        return timer.dueEvery - since;
+        // Below dueEvery, so it fits a u32.
+        u64 left <- interval - since;
+        return left[0, 32];
     }
 
-    // Set the origin explicitly, and drop the accumulated total.
+    // Set the origin explicitly, and drop the accumulated total and the last
+    // firing, which belongs to the old total.
     //
     // Seeding several timers from one clock reading aligns them exactly,
     // rather than letting them drift by the ticks between separate reset()
     // calls.
     public void resetTo(Timer timer, u32 now) {
         timer.total <- 0;
+        timer.lastFiredAt <- 0;
         timer.startedAtTick <- now;
         timer.started <- true;
     }

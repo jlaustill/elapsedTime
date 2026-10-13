@@ -247,13 +247,11 @@ void test_elapsed_survives_repeated_firings(void) {
     TEST_ASSERT_EQUAL_UINT64(10000u, ElapsedTime__elapsed(&t));
 }
 
-// The asymmetry the design calls out: isDue deliberately does NOT share the
-// safety fold, and a later reader must not "unify" the two paths.
-//
-// The case that catches unification is a long interval polled LATE -- past the
-// interval AND past the 2^31 fold threshold. A shared fold would zero `since`
-// before the due check ever ran, and the timer would never fire at all.
-// Polling on time never reaches 2^31, so it cannot detect the difference.
+// A long interval polled LATE -- past the interval AND past the 2^31 fold
+// threshold. isDue measures on the cumulative, which the fold keeps exact, so
+// the fold is invisible to it. A due check that compared the raw `since`
+// instead would see it zeroed by the fold and never fire at all. Polling on
+// time never reaches 2^31, so it cannot detect the difference.
 void test_a_long_interval_polled_late_still_fires(void) {
     ElapsedTime__Timer t = makeTimer(2147483000u);   // just under 2^31
     fakeNow = 0; ElapsedTime__isDue(&t);
@@ -386,6 +384,89 @@ void test_is_due_fires_across_a_narrow_wrap(void) {
     fakeNow = 44u; TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
 }
 
+// ------------------------------------------- isDue counts on the cumulative
+//
+// isDue fires when elapsed() has grown dueEvery past where it last fired. The
+// cumulative is the one quantity a safety fold keeps exact, so no read of the
+// timer can swallow a firing, and an interval can be longer than the tick's
+// own range.
+
+// The PR #10 review's timeline: the fold elapsed() runs at half the range
+// restarted the interval isDue measured, and the due firing was lost -- the
+// timer next fired at 228, 128 ticks late. Every read here is inside the
+// documented cadence.
+void test_an_elapsed_read_cannot_swallow_a_due_firing(void) {
+    ElapsedTime__Timer t = makeTimer(100);
+    t.tickBitWidth = 8;
+    fakeNow = 0;   ElapsedTime__isDue(&t);               // seeds
+    fakeNow = 120; ElapsedTime__elapsed(&t);
+    fakeNow = 128; ElapsedTime__elapsed(&t);             // folds at half range
+    TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));            // due since 100
+}
+
+// The same loss on a full tick, where the fold sits at 2^31.
+void test_an_elapsed_fold_cannot_swallow_a_due_firing_on_a_full_tick(void) {
+    ElapsedTime__Timer t = makeTimer(1000);
+    fakeNow = 0; ElapsedTime__isDue(&t);
+    fakeNow = 2147483648u; ElapsedTime__elapsed(&t);     // folds
+    TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+}
+
+// An interval longer than the tick's range: `since` can never reach it, so a
+// due check on `since` never fired at all. Polled every 10 ticks, a 300-tick
+// interval on an 8-bit tick fires at 300, 600, ... 99900.
+void test_due_every_beyond_a_narrow_range_fires(void) {
+    ElapsedTime__Timer t = makeTimer(300);
+    t.tickBitWidth = 8;
+    fakeNow = 0; ElapsedTime__isDue(&t);
+    uint32_t fired = 0;
+    for (uint32_t tick = 10; tick <= 100000; tick += 10) {
+        fakeNow = tick % 256u;
+        if (ElapsedTime__isDue(&t)) { fired++; }
+    }
+    TEST_ASSERT_EQUAL_UINT32(333u, fired);
+}
+
+// The review's example: a 1 MHz timer with auto-reload 999 and "every 5 ms".
+void test_due_every_beyond_an_auto_reload_range_fires(void) {
+    ElapsedTime__Timer t = makeTimer(5000);
+    t.tickMaxValue = 999u;
+    fakeNow = 0; ElapsedTime__isDue(&t);
+    uint32_t fired = 0;
+    for (uint32_t tick = 100; tick <= 100000; tick += 100) {
+        fakeNow = tick % 1000u;
+        if (ElapsedTime__isDue(&t)) { fired++; }
+    }
+    TEST_ASSERT_EQUAL_UINT32(20u, fired);
+}
+
+// remaining() counts on the same cumulative, so it too sees past the range.
+void test_remaining_counts_down_past_a_narrow_range(void) {
+    ElapsedTime__Timer t = makeTimer(300);
+    t.tickBitWidth = 8;
+    fakeNow = 0; ElapsedTime__isDue(&t);
+    for (uint32_t tick = 10; tick <= 290; tick += 10) {
+        fakeNow = tick % 256u;
+        ElapsedTime__remaining(&t);                      // polled inside the cadence
+    }
+    TEST_ASSERT_EQUAL_UINT32(10u, ElapsedTime__remaining(&t));
+    fakeNow = 300u % 256u;
+    TEST_ASSERT_EQUAL_UINT32(0u, ElapsedTime__remaining(&t));
+}
+
+// A reset starts the interval over. Where isDue last fired belongs to the old
+// cumulative, so a reset that kept it would leave the timer silent until the
+// new cumulative caught up with the old firing.
+void test_reset_restarts_the_due_interval(void) {
+    ElapsedTime__Timer t = makeTimer(250);
+    fakeNow = 0;   ElapsedTime__isDue(&t);
+    fakeNow = 250; TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+    fakeNow = 500; TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+    fakeNow = 600; ElapsedTime__reset(&t);
+    fakeNow = 849; TEST_ASSERT_FALSE(ElapsedTime__isDue(&t));
+    fakeNow = 850; TEST_ASSERT_TRUE(ElapsedTime__isDue(&t));
+}
+
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_fresh_timer_against_a_running_clock_reports_no_elapsed_time);
@@ -418,5 +499,11 @@ int main(int, char **) {
     RUN_TEST(test_a_bit_width_of_32_or_more_is_the_full_u32_range);
     RUN_TEST(test_elapsed_is_unbounded_on_a_narrow_tick);
     RUN_TEST(test_is_due_fires_across_a_narrow_wrap);
+    RUN_TEST(test_an_elapsed_read_cannot_swallow_a_due_firing);
+    RUN_TEST(test_an_elapsed_fold_cannot_swallow_a_due_firing_on_a_full_tick);
+    RUN_TEST(test_due_every_beyond_a_narrow_range_fires);
+    RUN_TEST(test_due_every_beyond_an_auto_reload_range_fires);
+    RUN_TEST(test_remaining_counts_down_past_a_narrow_range);
+    RUN_TEST(test_reset_restarts_the_due_interval);
     return UNITY_END();
 }
