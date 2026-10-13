@@ -31,6 +31,11 @@ static inline uint32_t cnx_clamp_sub_u32(uint32_t a, uint64_t b) {
     return (uint32_t)(a - (uint32_t)b);
 }
 
+static inline uint64_t cnx_clamp_sub_u64(uint64_t a, uint64_t b) {
+    if (b > (uint64_t)a) return 0;
+    return (uint64_t)(a - (uint64_t)b);
+}
+
 // elapsedTime -- portable, tick-agnostic elapsed-time timers.
 //
 // The clock is supplied by the caller, so nothing here names a platform and the
@@ -41,11 +46,23 @@ uint32_t ElapsedTime__tickSource(void) {
     return 0U;
 }
 
-static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now) {
+static uint32_t ElapsedTime__tickCeiling(const ElapsedTime__Timer* timer) {
+    if (timer->tickMaxValue != 0) {
+        return timer->tickMaxValue;
+    }
+    uint8_t width = timer->tickBitWidth;
+    if ((width == 0) || (width >= 32)) {
+        return 4294967295U;
+    }
+    uint32_t one = 1U;
+    return cnx_clamp_sub_u32((one << width), 1U);
+}
+
+static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now, uint32_t ceiling) {
     if (now >= base) {
         return cnx_clamp_sub_u32(now, base);
     }
-    return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(4294967295U, base)), now), 1U);
+    return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(ceiling, base)), now), 1U);
 }
 
 static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
@@ -54,26 +71,15 @@ static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
         timer->startedAtTick = now;
         return 0U;
     }
-    return ElapsedTime__sinceTick(timer->startedAtTick, now);
-}
-
-bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
-    if (timer->dueEvery == 0) {
-        return false;
-    }
-    uint32_t now = timer->tick();
-    uint32_t since = ElapsedTime__sinceNow(timer, now);
-    if (since < timer->dueEvery) {
-        return false;
-    }
-    timer->total = cnx_clamp_add_u64(timer->total, since);
-    timer->startedAtTick = now;
-    return true;
+    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    return ElapsedTime__sinceTick(timer->startedAtTick, now, ceiling);
 }
 
 static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
     uint32_t since = ElapsedTime__sinceNow(timer, now);
-    if (since >= 2147483648) {
+    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    uint32_t foldAt = cnx_clamp_add_u32((ceiling >> 1U), 1U);
+    if (since >= foldAt) {
         timer->total = cnx_clamp_add_u64(timer->total, since);
         timer->startedAtTick = now;
         uint64_t folded = timer->total;
@@ -81,6 +87,25 @@ static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
     }
     uint64_t accumulated = timer->total;
     return cnx_clamp_add_u64(accumulated, since);
+}
+
+static uint64_t ElapsedTime__sinceFiring(ElapsedTime__Timer* timer) {
+    uint32_t now = timer->tick();
+    uint64_t elapsedNow = ElapsedTime__valueAt(timer, now);
+    return cnx_clamp_sub_u64(elapsedNow, timer->lastFiredAt);
+}
+
+bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
+    if (timer->dueEvery == 0) {
+        return false;
+    }
+    uint64_t since = ElapsedTime__sinceFiring(timer);
+    uint64_t interval = timer->dueEvery;
+    if (since < interval) {
+        return false;
+    }
+    timer->lastFiredAt = cnx_clamp_add_u64(timer->lastFiredAt, since);
+    return true;
 }
 
 uint64_t ElapsedTime__elapsed(ElapsedTime__Timer* timer) {
@@ -99,16 +124,18 @@ uint32_t ElapsedTime__remaining(ElapsedTime__Timer* timer) {
     if (timer->dueEvery == 0) {
         return 4294967295U;
     }
-    uint32_t now = timer->tick();
-    uint32_t since = ElapsedTime__sinceNow(timer, now);
-    if (since >= timer->dueEvery) {
+    uint64_t since = ElapsedTime__sinceFiring(timer);
+    uint64_t interval = timer->dueEvery;
+    if (since >= interval) {
         return 0U;
     }
-    return cnx_clamp_sub_u32(timer->dueEvery, since);
+    uint64_t left = cnx_clamp_sub_u64(interval, since);
+    return (uint32_t)((left) & 0xFFFFFFFFU);
 }
 
 void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now) {
     timer->total = 0ULL;
+    timer->lastFiredAt = 0ULL;
     timer->startedAtTick = now;
     timer->started = true;
 }

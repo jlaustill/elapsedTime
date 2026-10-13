@@ -16,33 +16,63 @@ scope ElapsedTime {
     //
     //     ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
     //
-    // The two fields a user writes come first, so the struct reads in the order
-    // it is typed. The rest are internal and zero-fill (C99 6.7.9p21).
+    // A tick that wraps below 2^32 also declares its range, either way:
+    //
+    //     ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickMaxValue: 65535 };
+    //     ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
+    //
+    // The fields a user writes come first, so the struct reads in the order it
+    // is typed. The rest are internal and zero-fill (C99 6.7.9p21).
     public struct Timer {
         u32 dueEvery;           // isDue interval; 0 means never due
         tickSource tick;        // the clock
+        u32 tickMaxValue;       // the tick's last value before it wraps; 0 means u32 max
+        u8 tickBitWidth;        // or its width in bits; 0 means 32
         u64 total;              // internal -- elapsed folded in by earlier folds
+        u64 lastFiredAt;        // internal -- elapsed() when isDue last fired
         u32 startedAtTick;      // internal -- origin of the current interval
         bool started;           // internal -- false until the first touch
     }
 
-    // Wrap-safe ticks from base to now.
+    // The tick's last value before it wraps back to 0.
     //
-    // Every u32 tick source wraps -- 49.7 days at milliseconds, 71.6 minutes at
-    // microseconds. Teensy's elapsedMillis stays correct across that only
-    // because C's unsigned subtraction wraps; C-Next defaults to clamp
-    // arithmetic, which saturates instead and would stall every timer for a
-    // full wrap period. So the wrap is one visible branch.
+    // Both fields zero-fill to the default, a full u32 tick. The max value wins
+    // when both are declared: it is the more exact of the two, and the only one
+    // that can express a range like 0..999. A width of 32 or more is the full
+    // range, because a u32 tick cannot be wider.
+    private u32 tickCeiling(Timer timer) {
+        if (timer.tickMaxValue != 0) {
+            return timer.tickMaxValue;
+        }
+        u8 width <- timer.tickBitWidth;
+        if ((width = 0) || (width >= 32)) {
+            return 4294967295;
+        }
+        // A typed u32, not a literal: c-next clamps (one << width) - 1 but not
+        // (1 << width) - 1. TODO(c-next#2040): inline the literal once it does.
+        u32 one <- 1;
+        return (one << width) - 1;
+    }
+
+    // Wrap-safe ticks from base to now, on a tick that wraps after ceiling.
+    //
+    // Every tick wraps -- a u32 one at 49.7 days of milliseconds or 71.6
+    // minutes of microseconds, a narrower one far sooner. Teensy's elapsedMillis
+    // stays correct across that only because C's unsigned subtraction wraps;
+    // C-Next defaults to clamp arithmetic, which saturates instead and would
+    // stall every timer for a full wrap period. So the wrap is one visible
+    // branch, and it counts up to the tick's own ceiling, not the u32 one.
     //
     // Cannot overflow: the second branch runs only when now < base, so the
-    // result is at most 4294967295 exactly. The clamp helpers C-Next emits
-    // around it therefore never fire, and they stay: if this branch is ever
-    // wrong, a reading that saturates fails safer than one that wraps.
-    private u32 sinceTick(u32 base, u32 now) {
+    // result is at most ceiling exactly. The clamp helpers C-Next emits around
+    // it therefore never fire, and they stay: if this branch is ever wrong, or
+    // a tick reads above the range it declared, a reading that saturates fails
+    // safer than one that wraps.
+    private u32 sinceTick(u32 base, u32 now, u32 ceiling) {
         if (now >= base) {
             return now - base;
         }
-        return (4294967295 - base) + now + 1;
+        return (ceiling - base) + now + 1;
     }
 
     // Ticks since the origin, seeding the timer if this is its first touch.
@@ -60,7 +90,46 @@ scope ElapsedTime {
             timer.startedAtTick <- now;
             return 0;
         }
-        return sinceTick(timer.startedAtTick, now);
+        u32 ceiling <- tickCeiling(timer);
+        return sinceTick(timer.startedAtTick, now, ceiling);
+    }
+
+    // The u64 cumulative, folding first when the un-drained interval comes
+    // within reach of the tick's ceiling.
+    //
+    // Folding is private and automatic because the proof of concept's public
+    // handleOverflow() was a step a user could forget, and forgetting it was
+    // silent. The threshold is half the tick's range -- 2^31 on a full u32
+    // tick, which is 24.8 days at milliseconds and 35.8 minutes at
+    // microseconds; 128 on an 8-bit tick. Half leaves a whole half-range of
+    // margin before the ceiling while costing one u64 add per fold. It has to
+    // follow the range: at a fixed 2^31 a narrow tick never reaches the
+    // threshold, never folds, and loses a whole range on every wrap.
+    private u64 valueAt(Timer timer, u32 now) {
+        u32 since <- sinceNow(timer, now);
+        u32 ceiling <- tickCeiling(timer);
+        u32 foldAt <- (ceiling >> 1) + 1;
+        if (since >= foldAt) {
+            timer.total +<- since;
+            timer.startedAtTick <- now;
+            u64 folded <- timer.total;
+            return folded;
+        }
+        u64 accumulated <- timer.total;
+        return accumulated + since;
+    }
+
+    // Ticks since isDue last fired, measured on the u64 cumulative.
+    //
+    // The cumulative is the one quantity a safety fold keeps exact, so no read
+    // of the timer -- elapsed(), hasElapsed(), or isDue itself -- can restart
+    // the interval behind isDue's back. And it is not bounded by the tick's
+    // range: a narrow tick's `since` never exceeds its ceiling, so a due check
+    // on `since` could never reach a dueEvery at or above the range.
+    private u64 sinceFiring(Timer timer) {
+        u32 now <- timer.tick();
+        u64 elapsedNow <- valueAt(timer, now);
+        return elapsedNow - timer.lastFiredAt;
     }
 
     // Is the interval up? If so, advance the timer and say true.
@@ -78,44 +147,22 @@ scope ElapsedTime {
     // when a handler outruns its interval; advancing to now does neither, and
     // self-limits to the handler's real rate.
     //
-    // Folds rather than resets, so elapsed() stays a true cumulative on a
-    // polled timer instead of being zeroed on every firing.
+    // Firing records where the cumulative stood rather than moving the origin,
+    // so elapsed() stays a true cumulative on a polled timer instead of being
+    // zeroed on every firing.
     public bool isDue(Timer timer) {
         if (timer.dueEvery = 0) {
             return false;
         }
 
-        u32 now <- timer.tick();
-        u32 since <- sinceNow(timer, now);
-        if (since < timer.dueEvery) {
+        u64 since <- sinceFiring(timer);
+        u64 interval <- timer.dueEvery;
+        if (since < interval) {
             return false;
         }
 
-        timer.total +<- since;
-        timer.startedAtTick <- now;
+        timer.lastFiredAt +<- since;
         return true;
-    }
-
-    // The u64 cumulative, folding first when the un-drained interval comes
-    // within reach of the u32 ceiling.
-    //
-    // Folding is private and automatic because the proof of concept's public
-    // handleOverflow() was a step a user could forget, and forgetting it was
-    // silent. The threshold is a fixed 2^31 -- 24.8 days at milliseconds, 35.8
-    // minutes at microseconds -- which leaves an enormous margin before the
-    // ceiling while costing one u64 add per 2^31 ticks. It is also the cheapest
-    // threshold to test: `since >= 2147483648` is "is bit 31 set", a single
-    // high-byte test on AVR rather than a four-byte comparison.
-    private u64 valueAt(Timer timer, u32 now) {
-        u32 since <- sinceNow(timer, now);
-        if (since >= 2147483648) {
-            timer.total +<- since;
-            timer.startedAtTick <- now;
-            u64 folded <- timer.total;
-            return folded;
-        }
-        u64 accumulated <- timer.total;
-        return accumulated + since;
     }
 
     // Total elapsed since the timer started, unbounded.
@@ -155,21 +202,25 @@ scope ElapsedTime {
             return 4294967295;
         }
 
-        u32 now <- timer.tick();
-        u32 since <- sinceNow(timer, now);
-        if (since >= timer.dueEvery) {
+        u64 since <- sinceFiring(timer);
+        u64 interval <- timer.dueEvery;
+        if (since >= interval) {
             return 0;
         }
-        return timer.dueEvery - since;
+        // Below dueEvery, so it fits a u32.
+        u64 left <- interval - since;
+        return left[0, 32];
     }
 
-    // Set the origin explicitly, and drop the accumulated total.
+    // Set the origin explicitly, and drop the accumulated total and the last
+    // firing, which belongs to the old total.
     //
     // Seeding several timers from one clock reading aligns them exactly,
     // rather than letting them drift by the ticks between separate reset()
     // calls.
     public void resetTo(Timer timer, u32 now) {
         timer.total <- 0;
+        timer.lastFiredAt <- 0;
         timer.startedAtTick <- now;
         timer.started <- true;
     }
