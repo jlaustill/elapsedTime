@@ -2,9 +2,8 @@
 
 Portable, tick-agnostic elapsed-time timers for [C-Next](https://github.com/jlaustill/c-next) — the ergonomics behind Teensy's `elapsedMillis`, for **any MCU**, **any tick source**, and with **no 49.7-day ceiling**.
 
-> **Status: implemented, 36/36 tests passing.** Requires a C-Next build from
-> `main`; no release yet transpiles it — see
-> [Requirements](#requirements).
+> **Status: implemented, 36/36 tests passing.** Requires C-Next 0.4.0 or
+> later — see [Requirements](#requirements).
 
 ## Why
 
@@ -27,7 +26,7 @@ Three things stop it going further, and this library fixes all three.
 ## Usage
 
 ```cnx
-ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
+mut ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
 
 void loop() {
     bool due <- ElapsedTime.isDue(elapsed250);
@@ -41,7 +40,7 @@ That declaration is the whole setup. There is no constructor, no `setup()` step 
 
 `isDue` is the whole pattern in one call: it reports whether the interval has elapsed and advances the timer if it has, so there is no reset to forget, and the interval lives with the timer rather than being repeated at every call site.
 
-(Two lines rather than one because C-Next forbids a function call inside an `if` condition — MISRA C:2012 Rule 13.5, `E0702`.)
+(Two lines rather than one because C-Next forbids a function call inside an `if` condition — MISRA C:2012 Rule 13.5, `E0702`. And `mut` because every call writes the timer: C-Next makes a binding read-only unless it is declared `mut` — ADR-071, `E0900`.)
 
 Uptime past 49.7 days needs no extra call — folding is internal and automatic, as long as the timer is read at least once per half range of its tick (see [Constraints](#constraints)):
 
@@ -69,8 +68,8 @@ It also means the library is not embedded-specific at all. Nothing in it names a
 The library expects a tick that counts all the way to `4294967295` before wrapping to 0. A tick that wraps sooner — a 16-bit hardware timer, a 24-bit counter, a timer with an auto-reload — must declare its range beside its clock. Otherwise its first wrap reports an elapsed time billions of ticks too long. Declare it whichever way is natural:
 
 ```cnx
-ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
-ElapsedTime.Timer frame  <- { dueEvery: 10,  tick: tim2Count,   tickMaxValue: 999 };  // ARR = 999
+mut ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
+mut ElapsedTime.Timer frame  <- { dueEvery: 10,  tick: tim2Count,   tickMaxValue: 999 };  // ARR = 999
 ```
 
 - **`tickBitWidth`** covers a counter that wraps at a power of two: 8, 16, 24. `0`, and anything from 32 up, means the full `u32` range.
@@ -86,10 +85,10 @@ The tick must also count *up*. ARM SysTick's `VAL` counts down from its reload v
 Nothing in the library assumes time. `sinceTick` needs only a monotonically increasing `u32`, so a counter works exactly as well as a clock — feed it a value your own code increments and `dueEvery: 100` means *every hundredth execution*, while `elapsed()` becomes a total execution count, unbounded past 2³² exactly as time is.
 
 ```cnx
-u32 framesSeen <- 0;
+mut u32 framesSeen <- 0;                    // incremented by the code being counted
 u32 frameTick() { return framesSeen; }      // a pure READ
 
-ElapsedTime.Timer everyHundredthFrame <- { dueEvery: 100, tick: frameTick };
+mut ElapsedTime.Timer everyHundredthFrame <- { dueEvery: 100, tick: frameTick };
 ```
 
 The increment belongs in the code being counted; the tick function must stay a pure read. A tick that incremented on read would count *observations* rather than executions, and every `elapsed()` call would inflate it.
@@ -117,12 +116,12 @@ scope ElapsedTime {
         bool started;        // internal -- false until the first touch
     }
 
-    public bool isDue(Timer timer);                  // due? if so, advance and say true
-    public u64  elapsed(Timer timer);                // total elapsed, unbounded
-    public bool hasElapsed(Timer timer, u32 ticks);  // non-advancing threshold test
-    public u32  remaining(Timer timer);              // ticks until due
-    public void reset(Timer timer);                  // origin <- tick()
-    public void resetTo(Timer timer, u32 now);       // origin <- now
+    public bool isDue(mut Timer timer);                  // due? if so, advance and say true
+    public u64  elapsed(mut Timer timer);                // total elapsed, unbounded
+    public bool hasElapsed(mut Timer timer, u32 ticks);  // non-advancing threshold test
+    public u32  remaining(mut Timer timer);              // ticks until due
+    public void reset(mut Timer timer);                  // origin <- tick()
+    public void resetTo(mut Timer timer, u32 now);       // origin <- now
 }
 ```
 
@@ -174,7 +173,7 @@ A test pins each, and another polls a long interval late, past both the interval
 
 **`resetTo()` exists for exact origins.** `reset()` reads the clock; `resetTo()` takes the reading from you. One reading shared across several timers aligns them exactly, rather than letting them drift by the ticks between separate `reset()` calls.
 
-**Every accessor mutates, so none can take `const`.** Folding is a write. That is honest rather than unfortunate: a timer is a stateful object, and `elapsedMillis` behaves the same way.
+**Every accessor mutates, so every one takes its timer `mut`.** Folding is a write, even in `hasElapsed()` and `remaining()`, so a timer is declared `mut` wherever it lives. That is honest rather than unfortunate: a timer is a stateful object, and `elapsedMillis` behaves the same way.
 
 **Each timer is independent.** A module in another file owns its own timer, and nothing is shared, so nothing coordinates.
 
@@ -186,14 +185,13 @@ The one limit is half the tick's range: 2^31 on a full `u32` tick, which is 24.8
 
 ## Requirements
 
-**C-Next from `main`.** `0.3.0` cannot transpile this library:
+**C-Next [0.4.0](https://github.com/jlaustill/c-next/releases/tag/v0.4.0) or later.** No earlier release can transpile this library:
 
-- [c-next#1207](https://github.com/jlaustill/c-next/pull/1207) (merged after `0.3.0` was cut) — a function-as-type field in a scope-nested struct emitted no function-pointer typedef, so the generated C did not compile.
-- `tickSource` living *inside* the scope and referenced bare from `Timer` in that same scope. The header must emit `ElapsedTime__tickSource_fp`; earlier builds emitted a raw name that is not a type. Opened as [c-next#1281](https://github.com/jlaustill/c-next/pull/1281), which was closed unmerged after being blocked on [#1285](https://github.com/jlaustill/c-next/issues/1285); the fix reached `main` through that refactor instead.
+- `0.3.0` lacks [c-next#1207](https://github.com/jlaustill/c-next/pull/1207): a function-as-type field in a scope-nested struct emitted no function-pointer typedef, so the generated C did not compile. It also emits a raw name that is not a type where `Timer` names `tickSource` bare from inside the same scope; the header must emit `ElapsedTime__tickSource_fp`. That fix was opened as [c-next#1281](https://github.com/jlaustill/c-next/pull/1281), closed unmerged after being blocked on [#1285](https://github.com/jlaustill/c-next/issues/1285), and reached `main` through that refactor instead.
+- `0.3.1` rejects every parenthesized comparison in a condition with E0701 ([c-next#1195](https://github.com/jlaustill/c-next/issues/1195)), and `tickCeiling` writes `if ((width = 0) || (width >= 32))`. It also leaves the `u64` fold `total +<- since` unclamped, where `0.4.0` emits `cnx_clamp_add_u64`.
+- Both predate `mut` ([ADR-071](https://github.com/jlaustill/c-next/blob/main/docs/decisions/adr-071-read-only-by-default.md)), which `0.4.0` added and requires on every binding that is written — here, the timer parameter of every function that writes it or passes it on.
 
-`0.3.1` carries both fixes, but it cannot transpile this library either. It rejects every parenthesized comparison in a condition with E0701 ([c-next#1195](https://github.com/jlaustill/c-next/issues/1195)), and `tickCeiling` writes `if ((width = 0) || (width >= 32))`. That was fixed on `main` by [c-next#2021](https://github.com/jlaustill/c-next/pull/2021), which no release carries yet. `0.3.1` also leaves the `u64` fold `total +<- since` unclamped, where `main` emits `cnx_clamp_add_u64`. Until a release matches `main`, regenerate from `main`.
-
-The committed `.c`/`.h` were generated from C-Next `main` at [`cb21e1c`](https://github.com/jlaustill/c-next/commit/cb21e1c99648e825b8cfb804a43c6983984e2c46), and regenerating reproduces them byte for byte.
+The committed `.c`/`.h` were generated by C-Next `0.4.0`, and regenerating reproduces them byte for byte. A read-only binding is now emitted with C's `const`. In the header that only adds `const` to the by-value `u32` parameters of `hasElapsed` and `resetTo`, which is not part of a C function's type (C11 6.7.6.3p15), so existing callers and the ABI are unchanged.
 
 **One set of generated files serves every target.** ADR-049 has every program name exactly one target, so `cnext.config.json` names `host`, which matches the native test suite. Here the choice changes nothing: generating for each of the 13 targets C-Next knows (`host`, AVR, ESP32, Cortex-M0 through M7, STM32F4, Teensy 4.x) gives a byte-identical `.c` and `.h`, because the library uses nothing target-specific. If that changes — an `atomic` tick, say — the output will differ per target, and the library will ship one set per target.
 

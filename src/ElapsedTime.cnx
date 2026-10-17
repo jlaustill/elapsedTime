@@ -14,12 +14,14 @@ scope ElapsedTime {
 
     // A timer declaration is complete on its own:
     //
-    //     ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
+    //     mut ElapsedTime.Timer elapsed250 <- { dueEvery: 250, tick: millis };
+    //
+    // It is `mut` because every call writes it (ADR-071).
     //
     // A tick that wraps below 2^32 also declares its range, either way:
     //
-    //     ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickMaxValue: 65535 };
-    //     ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
+    //     mut ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickMaxValue: 65535 };
+    //     mut ElapsedTime.Timer sample <- { dueEvery: 100, tick: timer1Count, tickBitWidth: 16 };
     //
     // The fields a user writes come first, so the struct reads in the order it
     // is typed. The rest are internal and zero-fill (C99 6.7.9p21).
@@ -84,7 +86,7 @@ scope ElapsedTime {
     //
     // Seeding lives here and only here, so no two public functions can disagree
     // about what a fresh timer means.
-    private u32 sinceNow(Timer timer, u32 now) {
+    private u32 sinceNow(mut Timer timer, u32 now) {
         if (timer.started = false) {
             timer.started <- true;
             timer.startedAtTick <- now;
@@ -105,7 +107,7 @@ scope ElapsedTime {
     // margin before the ceiling while costing one u64 add per fold. It has to
     // follow the range: at a fixed 2^31 a narrow tick never reaches the
     // threshold, never folds, and loses a whole range on every wrap.
-    private u64 valueAt(Timer timer, u32 now) {
+    private u64 valueAt(mut Timer timer, u32 now) {
         u32 since <- sinceNow(timer, now);
         u32 ceiling <- tickCeiling(timer);
         u32 foldAt <- (ceiling >> 1) + 1;
@@ -126,7 +128,7 @@ scope ElapsedTime {
     // the interval behind isDue's back. And it is not bounded by the tick's
     // range: a narrow tick's `since` never exceeds its ceiling, so a due check
     // on `since` could never reach a dueEvery at or above the range.
-    private u64 sinceFiring(Timer timer) {
+    private u64 sinceFiring(mut Timer timer) {
         u32 now <- timer.tick();
         u64 elapsedNow <- valueAt(timer, now);
         return elapsedNow - timer.lastFiredAt;
@@ -150,7 +152,7 @@ scope ElapsedTime {
     // Firing records where the cumulative stood rather than moving the origin,
     // so elapsed() stays a true cumulative on a polled timer instead of being
     // zeroed on every firing.
-    public bool isDue(Timer timer) {
+    public bool isDue(mut Timer timer) {
         if (timer.dueEvery = 0) {
             return false;
         }
@@ -167,10 +169,10 @@ scope ElapsedTime {
 
     // Total elapsed since the timer started, unbounded.
     //
-    // Mutates, because folding is a write -- which is why no accessor here can
-    // take const. That is honest: a timer is a stateful object, and
+    // Mutates, because folding is a write -- which is why every accessor here
+    // takes its timer `mut`. That is honest: a timer is a stateful object, and
     // elapsedMillis behaves the same way.
-    public u64 elapsed(Timer timer) {
+    public u64 elapsed(mut Timer timer) {
         u32 now <- timer.tick();
         return valueAt(timer, now);
     }
@@ -183,7 +185,7 @@ scope ElapsedTime {
     // A u64 of milliseconds tops out 584 million years away, so a threshold
     // of a year is a legitimate call on hardware that will never reach its
     // own ceiling.
-    public bool hasElapsed(Timer timer, u32 ticks) {
+    public bool hasElapsed(mut Timer timer, u32 ticks) {
         u32 now <- timer.tick();
         u64 total <- valueAt(timer, now);
         u64 threshold <- ticks;
@@ -197,7 +199,7 @@ scope ElapsedTime {
     // decide how long it may sleep. u32max is the identity for minimum, so a
     // never-due timer correctly does not constrain the sleep; 0 would make
     // every never-due timer prevent sleeping entirely.
-    public u32 remaining(Timer timer) {
+    public u32 remaining(mut Timer timer) {
         if (timer.dueEvery = 0) {
             return 4294967295;
         }
@@ -218,14 +220,14 @@ scope ElapsedTime {
     // Seeding several timers from one clock reading aligns them exactly,
     // rather than letting them drift by the ticks between separate reset()
     // calls.
-    public void resetTo(Timer timer, u32 now) {
+    public void resetTo(mut Timer timer, u32 now) {
         timer.total <- 0;
         timer.lastFiredAt <- 0;
         timer.startedAtTick <- now;
         timer.started <- true;
     }
 
-    public void reset(Timer timer) {
+    public void reset(mut Timer timer) {
         u32 now <- timer.tick();
         resetTo(timer, now);
     }
