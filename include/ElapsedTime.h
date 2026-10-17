@@ -32,9 +32,9 @@ typedef struct ElapsedTime__Timer {
 uint32_t ElapsedTime__tickSource(void);
 bool ElapsedTime__isDue(ElapsedTime__Timer* timer);
 uint64_t ElapsedTime__elapsed(ElapsedTime__Timer* timer);
-bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, uint32_t ticks);
+bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, const uint32_t ticks);
 uint32_t ElapsedTime__remaining(ElapsedTime__Timer* timer);
-void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now);
+void ElapsedTime__resetTo(ElapsedTime__Timer* timer, const uint32_t now);
 void ElapsedTime__reset(ElapsedTime__Timer* timer);
 
 #ifdef __cplusplus

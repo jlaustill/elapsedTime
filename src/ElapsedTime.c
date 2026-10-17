@@ -50,48 +50,48 @@ static uint32_t ElapsedTime__tickCeiling(const ElapsedTime__Timer* timer) {
     if (timer->tickMaxValue != 0) {
         return timer->tickMaxValue;
     }
-    uint8_t width = timer->tickBitWidth;
+    const uint8_t width = timer->tickBitWidth;
     if ((width == 0) || (width >= 32)) {
         return 4294967295U;
     }
-    uint32_t one = 1U;
+    const uint32_t one = 1U;
     return cnx_clamp_sub_u32((one << width), 1U);
 }
 
-static uint32_t ElapsedTime__sinceTick(uint32_t base, uint32_t now, uint32_t ceiling) {
+static uint32_t ElapsedTime__sinceTick(const uint32_t base, const uint32_t now, const uint32_t ceiling) {
     if (now >= base) {
         return cnx_clamp_sub_u32(now, base);
     }
     return cnx_clamp_add_u32(cnx_clamp_add_u32((cnx_clamp_sub_u32(ceiling, base)), now), 1U);
 }
 
-static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, uint32_t now) {
+static uint32_t ElapsedTime__sinceNow(ElapsedTime__Timer* timer, const uint32_t now) {
     if (timer->started == false) {
         timer->started = true;
         timer->startedAtTick = now;
         return 0U;
     }
-    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    const uint32_t ceiling = ElapsedTime__tickCeiling(timer);
     return ElapsedTime__sinceTick(timer->startedAtTick, now, ceiling);
 }
 
-static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, uint32_t now) {
-    uint32_t since = ElapsedTime__sinceNow(timer, now);
-    uint32_t ceiling = ElapsedTime__tickCeiling(timer);
-    uint32_t foldAt = cnx_clamp_add_u32((ceiling >> 1U), 1U);
+static uint64_t ElapsedTime__valueAt(ElapsedTime__Timer* timer, const uint32_t now) {
+    const uint32_t since = ElapsedTime__sinceNow(timer, now);
+    const uint32_t ceiling = ElapsedTime__tickCeiling(timer);
+    const uint32_t foldAt = cnx_clamp_add_u32((ceiling >> 1U), 1U);
     if (since >= foldAt) {
         timer->total = cnx_clamp_add_u64(timer->total, since);
         timer->startedAtTick = now;
-        uint64_t folded = timer->total;
+        const uint64_t folded = timer->total;
         return folded;
     }
-    uint64_t accumulated = timer->total;
+    const uint64_t accumulated = timer->total;
     return cnx_clamp_add_u64(accumulated, since);
 }
 
 static uint64_t ElapsedTime__sinceFiring(ElapsedTime__Timer* timer) {
-    uint32_t now = timer->tick();
-    uint64_t elapsedNow = ElapsedTime__valueAt(timer, now);
+    const uint32_t now = timer->tick();
+    const uint64_t elapsedNow = ElapsedTime__valueAt(timer, now);
     return cnx_clamp_sub_u64(elapsedNow, timer->lastFiredAt);
 }
 
@@ -99,8 +99,8 @@ bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
     if (timer->dueEvery == 0) {
         return false;
     }
-    uint64_t since = ElapsedTime__sinceFiring(timer);
-    uint64_t interval = timer->dueEvery;
+    const uint64_t since = ElapsedTime__sinceFiring(timer);
+    const uint64_t interval = timer->dueEvery;
     if (since < interval) {
         return false;
     }
@@ -109,14 +109,14 @@ bool ElapsedTime__isDue(ElapsedTime__Timer* timer) {
 }
 
 uint64_t ElapsedTime__elapsed(ElapsedTime__Timer* timer) {
-    uint32_t now = timer->tick();
+    const uint32_t now = timer->tick();
     return ElapsedTime__valueAt(timer, now);
 }
 
-bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, uint32_t ticks) {
-    uint32_t now = timer->tick();
-    uint64_t total = ElapsedTime__valueAt(timer, now);
-    uint64_t threshold = ticks;
+bool ElapsedTime__hasElapsed(ElapsedTime__Timer* timer, const uint32_t ticks) {
+    const uint32_t now = timer->tick();
+    const uint64_t total = ElapsedTime__valueAt(timer, now);
+    const uint64_t threshold = ticks;
     return total >= threshold;
 }
 
@@ -124,16 +124,16 @@ uint32_t ElapsedTime__remaining(ElapsedTime__Timer* timer) {
     if (timer->dueEvery == 0) {
         return 4294967295U;
     }
-    uint64_t since = ElapsedTime__sinceFiring(timer);
-    uint64_t interval = timer->dueEvery;
+    const uint64_t since = ElapsedTime__sinceFiring(timer);
+    const uint64_t interval = timer->dueEvery;
     if (since >= interval) {
         return 0U;
     }
-    uint64_t left = cnx_clamp_sub_u64(interval, since);
+    const uint64_t left = cnx_clamp_sub_u64(interval, since);
     return (uint32_t)((left) & 0xFFFFFFFFU);
 }
 
-void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now) {
+void ElapsedTime__resetTo(ElapsedTime__Timer* timer, const uint32_t now) {
     timer->total = 0ULL;
     timer->lastFiredAt = 0ULL;
     timer->startedAtTick = now;
@@ -141,6 +141,6 @@ void ElapsedTime__resetTo(ElapsedTime__Timer* timer, uint32_t now) {
 }
 
 void ElapsedTime__reset(ElapsedTime__Timer* timer) {
-    uint32_t now = timer->tick();
+    const uint32_t now = timer->tick();
     ElapsedTime__resetTo(timer, now);
 }
